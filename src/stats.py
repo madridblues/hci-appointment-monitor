@@ -71,6 +71,10 @@ class Stats:
     total_notifications_sent: int = 0
     total_errors: int = 0
     last_check_at: str = ""
+    # Site health
+    site_status: str = ""          # "up", "down", "blocked", "timeout"
+    last_health_check: str = ""
+    health_history: list[dict] = field(default_factory=list)
     # Per-location state (latest check only)
     locations: dict[str, dict] = field(default_factory=dict)
     # Found log — every time slots were found (persistent history)
@@ -199,6 +203,25 @@ class StatsTracker:
                 "success": success,
             })
             self._stats.notification_log = self._stats.notification_log[-50:]
+            self._save()
+
+    def record_health_check(self, hc: dict):
+        with self._lock:
+            now = datetime.now().isoformat()
+            self._stats.site_status = hc.get("status", "unknown")
+            self._stats.last_health_check = now
+            entry = {
+                "timestamp": now,
+                "status": hc.get("status"),
+                "http_code": hc.get("http_code"),
+                "response_time": hc.get("response_time"),
+                "proxy_ip": hc.get("proxy_ip"),
+                "error": hc.get("error"),
+                "blocked": hc.get("blocked"),
+                "url": hc.get("url"),
+            }
+            self._stats.health_history.append(entry)
+            self._stats.health_history = self._stats.health_history[-50:]
             self._save()
 
     def set_proxy_ip(self, ip: str):

@@ -2,6 +2,7 @@
 
 import logging
 import re
+import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://appointment.hcilondon.gov.in/appointment.php"
 
 BATCH_SIZE = 5  # Number of green dates to check concurrently per batch
+HEALTH_CHECK_TIMEOUT = 30  # Quick ping timeout
 
 
 @dataclass
@@ -99,6 +101,71 @@ def _detect_proxy_ip(proxy_url: str) -> str:
         return resp.text.strip()
     except Exception:
         return "unknown"
+
+
+def health_check(proxy_url: str, location_id: str = "3", month: str = "04",
+                 year: str = "2026") -> dict:
+    """Quick health ping to the actual appointment URL via proxy.
+    Returns dict with status, response_time, http_code, blocked, error."""
+    url = build_url(month, year, "Submission", location_id, "29")
+    start = time.time()
+    result = {
+        "url": url,
+        "status": "unknown",
+        "response_time": 0,
+        "http_code": 0,
+        "blocked": None,
+        "error": None,
+        "proxy_ip": "unknown",
+    }
+    try:
+        session = _make_session(proxy_url)
+        response = session.get(url, timeout=HEALTH_CHECK_TIMEOUT, verify=False)
+        result["response_time"] = round(time.time() - start, 1)
+        result["http_code"] = response.status_code
+        result["proxy_ip"] = _detect_proxy_ip(proxy_url)
+        session.close()
+
+        # Check Cloudflare block
+        cf_block = _is_cloudflare_blocked(response)
+        if cf_block:
+            result["status"] = "blocked"
+            result["blocked"] = cf_block
+            return result
+
+        if response.status_code >= 500:
+            result["status"] = "server_error"
+            result["error"] = f"HTTP {response.status_code}"
+            return result
+
+        if response.status_code == 200:
+            # Verify it's actually the appointment page
+            if "calendar" in response.text.lower() or "appointment" in response.text.lower():
+                result["status"] = "up"
+            else:
+                result["status"] = "unexpected_content"
+                result["error"] = "Response doesn't contain expected content"
+            return result
+
+        result["status"] = "error"
+        result["error"] = f"HTTP {response.status_code}"
+        return result
+
+    except requests.exceptions.Timeout:
+        result["response_time"] = round(time.time() - start, 1)
+        result["status"] = "timeout"
+        result["error"] = f"Timed out after {HEALTH_CHECK_TIMEOUT}s"
+        return result
+    except requests.exceptions.ConnectionError as e:
+        result["response_time"] = round(time.time() - start, 1)
+        result["status"] = "connection_error"
+        result["error"] = str(e)[:100]
+        return result
+    except Exception as e:
+        result["response_time"] = round(time.time() - start, 1)
+        result["status"] = "error"
+        result["error"] = str(e)[:100]
+        return result
 
 
 CLOUDFLARE_BLOCK_SIGNATURES = [

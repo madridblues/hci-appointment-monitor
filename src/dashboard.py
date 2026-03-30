@@ -86,6 +86,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <div class="header">
   <h1>HCI Appointment Stats Tracker</h1>
   <div class="header-info">
+    <span id="site-health"></span>
     <span id="proxy-info"></span>
     <span id="started-info"></span>
     <span id="last-check-info"></span>
@@ -130,6 +131,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <table>
         <thead><tr><th>Time</th><th>Channel</th><th>Slots</th><th>Status</th></tr></thead>
         <tbody id="notification-log"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Site Health History</h2>
+    <div style="overflow-x:auto">
+      <table>
+        <thead><tr><th>Time</th><th>Status</th><th>HTTP</th><th>Response Time</th><th>Proxy IP</th><th>Details</th></tr></thead>
+        <tbody id="health-history"></tbody>
       </table>
     </div>
   </div>
@@ -218,6 +229,10 @@ function loadStats() {
     .then(r => r.json())
     .then(s => {
       // Header
+      const siteUp = s.site_status === 'up';
+      const siteColor = siteUp ? 'dot-green' : (s.site_status === 'blocked' ? 'dot-red' : 'dot-red');
+      const siteLabel = s.site_status ? s.site_status.toUpperCase() : 'UNKNOWN';
+      document.getElementById('site-health').innerHTML = '<span class="dot ' + siteColor + '"></span> HCI Site: ' + siteLabel;
       const pip = s.proxy_ip && s.proxy_ip !== 'unknown';
       document.getElementById('proxy-info').innerHTML = '<span class="dot ' + (pip ? 'dot-green' : 'dot-red') + '"></span> Proxy: ' + (s.proxy_ip || 'none');
       document.getElementById('started-info').textContent = 'Started: ' + fmt(s.started_at);
@@ -255,6 +270,19 @@ function loadStats() {
         '<tr><td>' + fmt(n.timestamp) + '</td><td>' + n.channel + '</td><td>' + n.slots_count +
         '</td><td class="' + (n.success ? 'ok' : 'err') + '">' + (n.success ? 'Sent' : 'Failed') + '</td></tr>'
       ).join('');
+
+      // Health history
+      const health = (s.health_history || []).slice().reverse().slice(0, 20);
+      document.getElementById('health-history').innerHTML = health.map(h => {
+        const statusClass = h.status === 'up' ? 'ok' : 'err';
+        const detail = h.error || h.blocked || '-';
+        return '<tr><td>' + fmt(h.timestamp) + '</td>' +
+          '<td class="' + statusClass + '" style="font-weight:600">' + (h.status || '?').toUpperCase() + '</td>' +
+          '<td>' + (h.http_code || '-') + '</td>' +
+          '<td>' + (h.response_time ? h.response_time + 's' : '-') + '</td>' +
+          '<td style="font-size:0.65rem">' + (h.proxy_ip || '-') + '</td>' +
+          '<td style="font-size:0.65rem;max-width:200px;overflow:hidden;text-overflow:ellipsis">' + detail + '</td></tr>';
+      }).join('');
     })
     .catch(() => {
       document.getElementById('stat-cards').innerHTML = '<div class="card"><div class="card-value red">Error loading stats</div></div>';

@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.config import LOCATION_NAMES, load_config
 from src.dashboard import start_dashboard
 from src.notifier import send_email, send_webhook
-from src.scraper import AvailableSlot, check_appointments, save_snapshot, build_url, _detect_proxy_ip
+from src.scraper import AvailableSlot, check_appointments, save_snapshot, build_url, _detect_proxy_ip, health_check
 from src.stats import tracker
 
 logging.basicConfig(
@@ -198,10 +198,24 @@ def main() -> None:
     previously_found: set[str] = set()
     while True:
         try:
-            # Detect one proxy IP per cycle (not per request)
-            cycle_ip = _detect_proxy_ip(config.proxy_url)
-            logger.info("=== Starting check cycle (proxy sample IP: %s) ===", cycle_ip)
-            tracker.set_proxy_ip(cycle_ip)
+            # Health check: ping one appointment URL before full cycle
+            hc = health_check(
+                config.proxy_url,
+                location_id=config.location_ids[0],
+                month=config.monitor_months[0],
+                year=config.year,
+            )
+            tracker.record_health_check(hc)
+            tracker.set_proxy_ip(hc.get("proxy_ip", "unknown"))
+
+            if hc["status"] not in ("up",):
+                logger.warning("=== Site not available: %s (%s) — skipping cycle ===",
+                               hc["status"], hc.get("error") or hc.get("blocked") or "")
+                time.sleep(config.check_interval)
+                continue
+
+            logger.info("=== Site UP (%s, %ss) — starting check cycle (proxy IP: %s) ===",
+                        hc["http_code"], hc["response_time"], hc.get("proxy_ip", "?"))
             slots = run_check()
 
             # Only notify on newly discovered slots (keyed by location+date)
