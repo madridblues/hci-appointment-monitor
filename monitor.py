@@ -243,11 +243,18 @@ def main() -> None:
 
             interval = get_check_interval(config)
 
-            if hc["status"] not in ("up",):
+            # Skip only on hard failures (blocked, maintenance, timeout)
+            # Proceed on server_error (520) since individual checks may work with different proxy IPs
+            skip_statuses = ("blocked", "maintenance", "timeout", "connection_error")
+            if hc["status"] in skip_statuses:
                 logger.warning("=== Site not available: %s (%s) — skipping cycle, next in %ds ===",
                                hc["status"], hc.get("error") or hc.get("blocked") or "", interval)
                 _sleep_with_state(interval, f"Site {hc['status']} — waiting")
                 continue
+
+            if hc["status"] not in ("up",):
+                logger.warning("=== Site degraded: %s (%s) — proceeding with checks anyway ===",
+                               hc["status"], hc.get("error") or "")
 
             logger.info("=== Site UP (%s, %ss) — starting check cycle (proxy IP: %s) ===",
                         hc["http_code"], hc["response_time"], hc.get("proxy_ip", "?"))

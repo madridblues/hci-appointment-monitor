@@ -119,12 +119,21 @@ def health_check(proxy_url: str, location_id: str = "3", month: str = "04",
         "proxy_ip": "unknown",
     }
     try:
-        session = _make_session(proxy_url)
-        response = session.get(url, timeout=HEALTH_CHECK_TIMEOUT, verify=False)
+        # Try up to 2 times on 5xx (520 is common Cloudflare fluke)
+        response = None
+        for hc_attempt in range(2):
+            session = _make_session(proxy_url)
+            response = session.get(url, timeout=HEALTH_CHECK_TIMEOUT, verify=False)
+            session.close()
+            if response.status_code < 500:
+                break
+            if hc_attempt == 0:
+                logger.info("Health check got HTTP %d, retrying with new proxy IP...", response.status_code)
+                time.sleep(2)
+
         result["response_time"] = round(time.time() - start, 1)
         result["http_code"] = response.status_code
         result["proxy_ip"] = _detect_proxy_ip(proxy_url)
-        session.close()
 
         # Check Cloudflare block
         cf_block = _is_cloudflare_blocked(response)
@@ -134,6 +143,8 @@ def health_check(proxy_url: str, location_id: str = "3", month: str = "04",
             return result
 
         if response.status_code >= 500:
+            # 5xx after retry — still report as server_error but mark as "degraded"
+            # so monitor can decide to try checks anyway
             result["status"] = "server_error"
             result["error"] = f"HTTP {response.status_code}"
             return result
