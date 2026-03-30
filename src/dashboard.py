@@ -71,7 +71,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <h2>Recent Checks</h2>
     <div style="overflow-x:auto">
       <table>
-        <thead><tr><th>Time</th><th>Month</th><th>Slots Found</th><th>Dates</th><th>Status</th></tr></thead>
+        <thead><tr><th>Time</th><th>Location</th><th>Month</th><th>Slots Found</th><th>Dates</th><th>Status</th></tr></thead>
         <tbody id="check-history"></tbody>
       </table>
     </div>
@@ -124,9 +124,9 @@ function loadStats() {
       }
 
       // Check history (newest first)
-      const checks = (s.check_history || []).slice().reverse().slice(0, 20);
+      const checks = (s.check_history || []).slice().reverse().slice(0, 30);
       document.getElementById('check-history').innerHTML = checks.map(c =>
-        `<tr><td>${fmt(c.timestamp)}</td><td>${c.month}/${c.year}</td><td>${c.slots_found}</td><td>${(c.available_dates||[]).join(', ') || '-'}</td><td class="${c.error ? 'status-err' : 'status-ok'}">${c.error || 'OK'}</td></tr>`
+        `<tr><td>${fmt(c.timestamp)}</td><td>${c.location_name || c.location_id || '-'}</td><td>${c.month}/${c.year}</td><td>${c.slots_found}</td><td>${(c.available_dates||[]).join(', ') || '-'}</td><td class="${c.error ? 'status-err' : 'status-ok'}">${c.error || 'OK'}</td></tr>`
       ).join('');
 
       // Notification log (newest first)

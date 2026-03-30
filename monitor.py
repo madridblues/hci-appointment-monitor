@@ -2,8 +2,9 @@
 """
 HCI London Appointment Monitor
 
-Continuously monitors the HCI London appointment booking page for available
-slots and sends notifications via email and/or webhook.
+Continuously monitors the HCI London appointment booking page across multiple
+locations and months for available slots with time information, and sends
+notifications via email and/or webhook.
 
 Usage:
     # Copy .env.example to .env and configure
@@ -24,7 +25,7 @@ import logging
 import sys
 import time
 
-from src.config import load_config
+from src.config import LOCATION_NAMES, load_config
 from src.dashboard import start_dashboard
 from src.notifier import send_email, send_webhook
 from src.scraper import AvailableSlot, check_appointments
@@ -73,27 +74,35 @@ def notify(slots: list[AvailableSlot]) -> None:
 
 
 def run_check() -> list[AvailableSlot]:
-    """Run a single check across all configured months."""
+    """Run a single check across all configured locations and months."""
     config = load_config()
-    months = config.monitor_months if config.monitor_months else [config.month]
 
     all_slots: list[AvailableSlot] = []
-    for month in months:
-        try:
-            slots = check_appointments(
-                month=month,
-                year=config.year,
-                apt_type=config.apt_type,
-                location_id=config.location_id,
-                service_id=config.service_id,
-                proxy_url=config.proxy_url,
-            )
-            all_slots.extend(slots)
-            dates = [s.date for s in slots]
-            tracker.record_check(month, config.year, len(slots), dates)
-        except Exception as e:
-            logger.exception("Error checking month %s/%s", month, config.year)
-            tracker.record_check(month, config.year, 0, [], error=str(e))
+    for location_id in config.location_ids:
+        location_name = LOCATION_NAMES.get(location_id, f"Location {location_id}")
+        for month in config.monitor_months:
+            try:
+                logger.info("Checking %s for %s/%s...", location_name, month, config.year)
+                slots = check_appointments(
+                    month=month,
+                    year=config.year,
+                    apt_type=config.apt_type,
+                    location_id=location_id,
+                    service_id=config.service_id,
+                    proxy_url=config.proxy_url,
+                )
+                all_slots.extend(slots)
+                dates = [s.date for s in slots]
+                tracker.record_check(
+                    month, config.year, len(slots), dates,
+                    location_id=location_id, location_name=location_name,
+                )
+            except Exception as e:
+                logger.exception("Error checking %s for %s/%s", location_name, month, config.year)
+                tracker.record_check(
+                    month, config.year, 0, [], error=str(e),
+                    location_id=location_id, location_name=location_name,
+                )
 
     return all_slots
 
@@ -112,14 +121,16 @@ def main() -> None:
             "Set EMAIL_ENABLED=true and/or WEBHOOK_ENABLED=true in .env"
         )
 
-    months = config.monitor_months if config.monitor_months else [config.month]
+    location_names = [LOCATION_NAMES.get(lid, lid) for lid in config.location_ids]
     logger.info(
-        "Monitoring appointments: months=%s, year=%s, type=%s, location=%s, service=%s",
-        months, config.year, config.apt_type, config.location_id, config.service_id,
+        "Monitoring %d locations: %s",
+        len(config.location_ids), ", ".join(location_names),
     )
-    logger.info("Check interval: %ds | Email: %s | Webhook: %s | Proxy: %s",
-                config.check_interval, config.email_enabled, config.webhook_enabled,
-                bool(config.proxy_url))
+    logger.info(
+        "Months: %s/%s | Type: %s | Interval: %ds | Email: %s | Webhook: %s",
+        ",".join(config.monitor_months), config.year, config.apt_type,
+        config.check_interval, config.email_enabled, config.webhook_enabled,
+    )
 
     # Start dashboard
     if not args.no_dashboard and not args.once and config.dashboard_enabled:
@@ -130,11 +141,13 @@ def main() -> None:
     if args.once:
         slots = run_check()
         if slots:
-            dates = [f"{s.month}/{s.date}/{s.year}" for s in slots]
-            logger.info("AVAILABLE: %s", ", ".join(dates))
+            for s in slots:
+                loc = LOCATION_NAMES.get(s.location_id, s.location_id)
+                times = ", ".join(f"{ts.time}({ts.available})" for ts in s.time_slots)
+                logger.info("AVAILABLE: %s - %s/%s/%s: %s", loc, s.date, s.month, s.year, times)
             notify(slots)
         else:
-            logger.info("No slots available.")
+            logger.info("No slots available at any location.")
         return
 
     # Continuous monitoring loop
@@ -142,15 +155,19 @@ def main() -> None:
     while True:
         try:
             slots = run_check()
-            # Only notify on newly discovered slots
-            new_slots = [s for s in slots if f"{s.month}/{s.date}/{s.year}" not in previously_found]
+            # Only notify on newly discovered slots (keyed by location+date)
+            new_slots = [
+                s for s in slots
+                if f"{s.location_id}/{s.month}/{s.date}/{s.year}" not in previously_found
+            ]
 
             if new_slots:
-                dates = [f"{s.month}/{s.date}/{s.year}" for s in new_slots]
-                logger.info("NEW SLOTS FOUND: %s", ", ".join(dates))
-                notify(new_slots)
                 for s in new_slots:
-                    previously_found.add(f"{s.month}/{s.date}/{s.year}")
+                    loc = LOCATION_NAMES.get(s.location_id, s.location_id)
+                    times = ", ".join(f"{ts.time}({ts.available})" for ts in s.time_slots)
+                    logger.info("NEW: %s - %s/%s/%s: %s", loc, s.date, s.month, s.year, times)
+                    previously_found.add(f"{s.location_id}/{s.month}/{s.date}/{s.year}")
+                notify(new_slots)
             else:
                 logger.info("No new slots. Next check in %ds...", config.check_interval)
 

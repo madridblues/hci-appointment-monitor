@@ -19,6 +19,8 @@ class CheckRecord:
     year: str
     slots_found: int
     available_dates: list[str]
+    location_id: str = ""
+    location_name: str = ""
     error: str = ""
 
 
@@ -32,7 +34,7 @@ class Stats:
     last_check_at: str = ""
     last_slots_found: int = 0
     last_available_dates: list[str] = field(default_factory=list)
-    currently_available: dict[str, list[str]] = field(default_factory=dict)  # month -> dates
+    currently_available: dict[str, list[str]] = field(default_factory=dict)  # "location/month" -> dates
     check_history: list[dict] = field(default_factory=list)  # last 100 checks
     notification_log: list[dict] = field(default_factory=list)  # last 50 notifications
 
@@ -57,7 +59,8 @@ class StatsTracker:
         STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
         STATS_FILE.write_text(json.dumps(asdict(self._stats), indent=2))
 
-    def record_check(self, month: str, year: str, slots_found: int, available_dates: list[str], error: str = ""):
+    def record_check(self, month: str, year: str, slots_found: int, available_dates: list[str],
+                     error: str = "", location_id: str = "", location_name: str = ""):
         with self._lock:
             now = datetime.now().isoformat()
             self._stats.total_checks += 1
@@ -67,18 +70,22 @@ class StatsTracker:
 
             if error:
                 self._stats.total_errors += 1
+
+            key = f"{location_name or location_id} {month}/{year}"
             if slots_found > 0:
                 self._stats.total_slots_found += slots_found
-                self._stats.currently_available[f"{month}/{year}"] = available_dates
+                self._stats.currently_available[key] = available_dates
             else:
-                self._stats.currently_available.pop(f"{month}/{year}", None)
+                self._stats.currently_available.pop(key, None)
 
             record = CheckRecord(
                 timestamp=now, month=month, year=year,
-                slots_found=slots_found, available_dates=available_dates, error=error,
+                slots_found=slots_found, available_dates=available_dates,
+                location_id=location_id, location_name=location_name,
+                error=error,
             )
             self._stats.check_history.append(asdict(record))
-            self._stats.check_history = self._stats.check_history[-100:]
+            self._stats.check_history = self._stats.check_history[-200:]
 
             self._save()
 

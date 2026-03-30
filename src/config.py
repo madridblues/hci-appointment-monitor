@@ -6,17 +6,34 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+# Location ID -> Name mapping
+LOCATION_NAMES = {
+    "3": "London - VFS, Goswell",
+    "4": "London - VFS, Hounslow",
+    "8": "Birmingham - VFS, Leicester",
+    "9": "Birmingham - VFS, Bradford",
+    "10": "Birmingham - VFS, Manchester",
+    "12": "Edinburgh - VFS, Glasgow",
+    "14": "Birmingham - VFS, Birmingham",
+    "22": "London - VFS, Belfast",
+    "23": "London - VFS, Cardiff",
+    "35": "Edinburgh - VFS, Edinburgh",
+}
+
 
 @dataclass
 class Config:
     # Appointment target
     appointment_url: str = "https://appointment.hcilondon.gov.in/appointment.php"
-    month: str = "04"
-    year: str = "2026"
     apt_type: str = "Submission"
-    location_id: str = "8"
     service_id: str = "29"
-    monitor_months: list[str] = field(default_factory=list)
+
+    # Multiple locations and months to monitor
+    location_ids: list[str] = field(default_factory=lambda: [
+        "3", "4", "8", "9", "10", "14", "22", "23",
+    ])
+    monitor_months: list[str] = field(default_factory=lambda: ["03", "04"])
+    year: str = "2026"
 
     # Monitoring
     check_interval: int = 300  # seconds
@@ -37,7 +54,7 @@ class Config:
     webhook_headers: str = ""
 
     # Proxy
-    proxy_url: str = ""  # e.g., http://user:pass@host:port or socks5://host:port
+    proxy_url: str = ""
 
     # Dashboard
     dashboard_enabled: bool = True
@@ -53,17 +70,26 @@ def load_config() -> Config:
     def _bool(val: str) -> bool:
         return val.lower() in ("true", "1", "yes")
 
-    monitor_months_raw = os.getenv("MONITOR_MONTHS", "")
-    monitor_months = [m.strip() for m in monitor_months_raw.split(",") if m.strip()]
+    def _list(val: str) -> list[str]:
+        return [v.strip() for v in val.split(",") if v.strip()]
+
+    # Location IDs: comma-separated list
+    default_locations = "3,4,8,9,10,14,22,23"
+    location_ids_raw = os.getenv("LOCATION_IDS", default_locations)
+    location_ids = _list(location_ids_raw)
+
+    # Months to monitor
+    default_months = "03,04"
+    monitor_months_raw = os.getenv("MONITOR_MONTHS", default_months)
+    monitor_months = _list(monitor_months_raw)
 
     return Config(
         appointment_url=os.getenv("APPOINTMENT_URL", Config.appointment_url),
-        month=os.getenv("MONTH", Config.month),
-        year=os.getenv("YEAR", Config.year),
         apt_type=os.getenv("APT_TYPE", Config.apt_type),
-        location_id=os.getenv("LOCATION_ID", Config.location_id),
         service_id=os.getenv("SERVICE_ID", Config.service_id),
+        location_ids=location_ids,
         monitor_months=monitor_months,
+        year=os.getenv("YEAR", Config.year),
         check_interval=int(os.getenv("CHECK_INTERVAL_SECONDS", str(Config.check_interval))),
         email_enabled=_bool(os.getenv("EMAIL_ENABLED", "false")),
         smtp_host=os.getenv("SMTP_HOST", Config.smtp_host),

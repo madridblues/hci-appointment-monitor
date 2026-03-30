@@ -8,6 +8,7 @@ from email.mime.text import MIMEText
 
 import requests
 
+from src.config import LOCATION_NAMES
 from src.scraper import AvailableSlot
 
 logger = logging.getLogger(__name__)
@@ -15,36 +16,35 @@ logger = logging.getLogger(__name__)
 
 def _build_message(slots: list[AvailableSlot]) -> tuple[str, str]:
     """Build plain text and HTML notification messages."""
-    grouped: dict[str, list[AvailableSlot]] = {}
+    # Group by location, then by month
+    by_location: dict[str, list[AvailableSlot]] = {}
     for slot in slots:
-        key = f"{slot.month}/{slot.year}"
-        grouped.setdefault(key, []).append(slot)
+        loc = LOCATION_NAMES.get(slot.location_id, f"Location {slot.location_id}")
+        by_location.setdefault(loc, []).append(slot)
 
     lines = ["HCI London Appointment Slots Available!", ""]
     html_parts = [
         "<h2>HCI London Appointment Slots Available!</h2>",
     ]
 
-    for period, period_slots in grouped.items():
-        apt_type = period_slots[0].apt_type
+    for location, loc_slots in by_location.items():
+        lines.append(f"=== {location} ===")
+        html_parts.append(f"<h3>{location}</h3>")
 
-        lines.append(f"Month: {period} | Type: {apt_type}")
-        html_parts.append(
-            f"<p><strong>Month:</strong> {period} | <strong>Type:</strong> {apt_type}</p>"
-        )
-
-        for slot in period_slots:
-            lines.append(f"  Date {slot.date}:")
-            html_parts.append(f"<p><strong>Date {slot.date}:</strong><br>")
+        for slot in loc_slots:
+            lines.append(f"  Date: {slot.date}/{slot.month}/{slot.year}")
+            html_parts.append(
+                f"<p><strong>Date {slot.date}/{slot.month}/{slot.year}:</strong><br>"
+            )
             if slot.time_slots:
                 for ts in slot.time_slots:
                     lines.append(f"    {ts.time} ({ts.available} slot(s))")
-                    html_parts.append(f"&nbsp;&nbsp;{ts.time} — {ts.available} slot(s)<br>")
-            else:
-                lines.append("    (time slots not checked)")
-                html_parts.append("&nbsp;&nbsp;(time slots not checked)<br>")
+                    html_parts.append(
+                        f"&nbsp;&nbsp;{ts.time} — {ts.available} slot(s)<br>"
+                    )
             lines.append(f"  Book: {slot.url}")
             html_parts.append(f'<a href="{slot.url}">Book Now &rarr;</a></p>')
+
         lines.append("")
 
     plain = "\n".join(lines)
@@ -65,8 +65,14 @@ def send_email(
     """Send an email notification about available slots."""
     plain, html = _build_message(slots)
 
+    # Count unique locations in the notification
+    locations = set(
+        LOCATION_NAMES.get(s.location_id, s.location_id) for s in slots
+    )
+    subject = f"Appointment Available - {len(slots)} slot(s) at {len(locations)} location(s)"
+
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"Appointment Available - HCI London ({len(slots)} slot(s))"
+    msg["Subject"] = subject
     msg["From"] = email_from
     msg["To"] = email_to
     msg.attach(MIMEText(plain, "plain"))
@@ -101,6 +107,7 @@ def send_webhook(
                 "year": s.year,
                 "apt_type": s.apt_type,
                 "location_id": s.location_id,
+                "location_name": LOCATION_NAMES.get(s.location_id, ""),
                 "service_id": s.service_id,
                 "url": s.url,
                 "time_slots": [
