@@ -16,49 +16,24 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://appointment.hcilondon.gov.in/appointment.php"
 
-# Cache proxy IPs per session
-_proxy_ip_cache: dict[str, str] = {}
-
-
-def _get_session_proxy(proxy_url: str, session_id: str) -> str:
-    """
-    Create a session-specific proxy URL for IP rotation.
-    Crawlbase supports session IDs via the username field.
-    Format: http://AUTH-session-SESSIONID:@host:port
-    """
-    if not proxy_url:
-        return ""
-    # Parse the proxy URL to inject session ID
-    # Input:  http://INh0R-WzM9dXbj2cXOHPag:@smartproxy.crawlbase.com:8012
-    # Output: http://INh0R-WzM9dXbj2cXOHPag-session-loc3:@smartproxy.crawlbase.com:8012
-    parsed = urlparse(proxy_url)
-    username = parsed.username or ""
-    host_port = f"{parsed.hostname}:{parsed.port}" if parsed.port else parsed.hostname
-    new_user = f"{username}-session-{session_id}"
-    return f"{parsed.scheme}://{new_user}:@{host_port}"
+_proxy_ip: str = ""
 
 
 def get_proxy_ip(proxy_url: str = "") -> str:
     """Detect the outgoing IP address (through proxy if configured)."""
+    global _proxy_ip
+    if _proxy_ip:
+        return _proxy_ip
     try:
         proxies = None
         if proxy_url:
             proxies = {"http": proxy_url, "https": proxy_url}
         resp = requests.get("https://api.ipify.org?format=json", timeout=15,
                             proxies=proxies, verify=not bool(proxy_url))
-        return resp.json().get("ip", "unknown")
+        _proxy_ip = resp.json().get("ip", "unknown")
     except Exception:
-        return "unknown"
-
-
-def get_proxy_ip_for_location(proxy_url: str, location_id: str) -> str:
-    """Get the proxy IP used for a specific location's session."""
-    if location_id in _proxy_ip_cache:
-        return _proxy_ip_cache[location_id]
-    session_proxy = _get_session_proxy(proxy_url, f"loc{location_id}")
-    ip = get_proxy_ip(session_proxy)
-    _proxy_ip_cache[location_id] = ip
-    return ip
+        _proxy_ip = "unknown"
+    return _proxy_ip
 
 
 @dataclass
@@ -92,35 +67,47 @@ def build_url(month: str, year: str, apt_type: str, location_id: str, service_id
     return f"{BASE_URL}?{urlencode(params)}"
 
 
-def _fetch_page(url: str, proxy_url: str = "", session_id: str = "") -> str:
-    """Fetch a page and return its HTML. Uses session-based proxy for IP rotation."""
-    headers = {
+def _fetch_page(url: str, proxy_url: str = "") -> str:
+    """Fetch a page using a fresh browser-like session each time."""
+    # Fresh session per request — clean cookies, no connection reuse
+    session = requests.Session()
+    session.headers.update({
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
+            "Chrome/131.0.0.0 Safari/537.36"
         ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    proxies = None
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Sec-Ch-Ua": '"Chromium";v="131", "Not_A Brand";v="24"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+    })
+
     verify_ssl = True
     if proxy_url:
-        # Use session-specific proxy for IP rotation per location
-        actual_proxy = _get_session_proxy(proxy_url, session_id) if session_id else proxy_url
-        proxies = {"http": actual_proxy, "https": actual_proxy}
+        session.proxies = {"http": proxy_url, "https": proxy_url}
         verify_ssl = False
 
     for attempt in range(3):
         try:
-            response = requests.get(url, headers=headers, timeout=120, proxies=proxies, verify=verify_ssl)
+            response = session.get(url, timeout=120, verify=verify_ssl)
             response.raise_for_status()
             break
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
             if attempt == 2:
                 raise
-            logger.warning("Attempt %d timed out, retrying...", attempt + 1)
+            logger.warning("Attempt %d failed, retrying...", attempt + 1)
             continue
+    session.close()
     return response.text
 
 
@@ -180,13 +167,10 @@ def check_appointments(
     url = build_url(month, year, apt_type, location_id, service_id)
     logger.info("Checking appointments at: %s", url)
 
-    session_id = f"loc{location_id}"
     if proxy_url:
-        # Log the proxy IP being used for this session
-        ip = get_proxy_ip_for_location(proxy_url, location_id)
-        logger.info("Using proxy session %s (IP: %s)", session_id, ip)
+        logger.info("Routing via proxy (IP: %s)", get_proxy_ip(proxy_url))
 
-    html = _fetch_page(url, proxy_url, session_id=session_id)
+    html = _fetch_page(url, proxy_url)
     bookable_dates = _parse_bookable_dates(html, month)
 
     if not bookable_dates:
@@ -200,7 +184,7 @@ def check_appointments(
     for date_str in bookable_dates:
         date_url = build_url(month, year, apt_type, location_id, service_id, date=date_str)
         try:
-            date_html = _fetch_page(date_url, proxy_url, session_id=session_id)
+            date_html = _fetch_page(date_url, proxy_url)
             time_slots = _parse_time_slots(date_html)
 
             if time_slots:
