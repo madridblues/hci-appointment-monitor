@@ -28,7 +28,7 @@ import time
 from src.config import LOCATION_NAMES, load_config
 from src.dashboard import start_dashboard
 from src.notifier import send_email, send_webhook
-from src.scraper import AvailableSlot, check_appointments
+from src.scraper import AvailableSlot, check_appointments, get_proxy_ip
 from src.stats import tracker
 
 logging.basicConfig(
@@ -93,9 +93,19 @@ def run_check() -> list[AvailableSlot]:
                 )
                 all_slots.extend(slots)
                 dates = [s.date for s in slots]
+                slot_details = [
+                    {
+                        "date": s.date,
+                        "month": s.month,
+                        "year": s.year,
+                        "time_slots": [{"time": ts.time, "available": ts.available} for ts in s.time_slots],
+                    }
+                    for s in slots
+                ]
                 tracker.record_check(
                     month, config.year, len(slots), dates,
                     location_id=location_id, location_name=location_name,
+                    slot_details=slot_details,
                 )
             except Exception as e:
                 logger.exception("Error checking %s for %s/%s", location_name, month, config.year)
@@ -126,6 +136,11 @@ def main() -> None:
         "Monitoring %d locations: %s",
         len(config.location_ids), ", ".join(location_names),
     )
+    # Detect and log proxy IP
+    proxy_ip = get_proxy_ip(config.proxy_url)
+    tracker.set_proxy_ip(proxy_ip)
+    logger.info("Outgoing IP: %s (proxy: %s)", proxy_ip, bool(config.proxy_url))
+
     logger.info(
         "Months: %s/%s | Type: %s | Interval: %ds | Email: %s | Webhook: %s",
         ",".join(config.monitor_months), config.year, config.apt_type,

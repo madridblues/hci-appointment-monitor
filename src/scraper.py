@@ -2,15 +2,39 @@
 
 import logging
 import re
+import warnings
 from dataclasses import dataclass, field
 from urllib.parse import urlencode, parse_qs, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
+# Suppress SSL warnings when using proxy
+warnings.filterwarnings("ignore", message="Unverified HTTPS request")
+
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://appointment.hcilondon.gov.in/appointment.php"
+
+# Cache the proxy IP
+_proxy_ip_cache: str = ""
+
+
+def get_proxy_ip(proxy_url: str = "") -> str:
+    """Detect the outgoing IP address (through proxy if configured)."""
+    global _proxy_ip_cache
+    if _proxy_ip_cache:
+        return _proxy_ip_cache
+    try:
+        proxies = None
+        if proxy_url:
+            proxies = {"http": proxy_url, "https": proxy_url}
+        resp = requests.get("https://api.ipify.org?format=json", timeout=15,
+                            proxies=proxies, verify=not bool(proxy_url))
+        _proxy_ip_cache = resp.json().get("ip", "unknown")
+    except Exception:
+        _proxy_ip_cache = "unknown"
+    return _proxy_ip_cache
 
 
 @dataclass
@@ -61,8 +85,16 @@ def _fetch_page(url: str, proxy_url: str = "") -> str:
         proxies = {"http": proxy_url, "https": proxy_url}
         verify_ssl = False  # proxy may intercept SSL
 
-    response = requests.get(url, headers=headers, timeout=30, proxies=proxies, verify=verify_ssl)
-    response.raise_for_status()
+    for attempt in range(3):
+        try:
+            response = requests.get(url, headers=headers, timeout=120, proxies=proxies, verify=verify_ssl)
+            response.raise_for_status()
+            break
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            if attempt == 2:
+                raise
+            logger.warning("Attempt %d timed out, retrying...", attempt + 1)
+            continue
     return response.text
 
 
