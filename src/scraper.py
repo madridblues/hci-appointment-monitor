@@ -139,12 +139,18 @@ def health_check(proxy_url: str, location_id: str = "3", month: str = "04",
             return result
 
         if response.status_code == 200:
+            body_lower = response.text.lower()
+            # Check for maintenance page
+            if "under maintenance" in body_lower or "we'll be back" in body_lower or "maintenance" in response.text[:500].lower():
+                result["status"] = "maintenance"
+                result["error"] = "Site is under maintenance"
+                return result
             # Verify it's actually the appointment page
-            if "calendar" in response.text.lower() or "appointment" in response.text.lower():
+            if "calendar" in body_lower or "appointment" in body_lower:
                 result["status"] = "up"
             else:
                 result["status"] = "unexpected_content"
-                result["error"] = "Response doesn't contain expected content"
+                result["error"] = f"Unexpected page (first 100 chars: {response.text[:100]})"
             return result
 
         result["status"] = "error"
