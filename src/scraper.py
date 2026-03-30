@@ -101,15 +101,64 @@ def _detect_proxy_ip(proxy_url: str) -> str:
         return "unknown"
 
 
+CLOUDFLARE_BLOCK_SIGNATURES = [
+    "attention required",
+    "cf-browser-verification",
+    "cloudflare ray id",
+    "enable javascript and cookies to continue",
+    "checking your browser",
+    "please turn javascript on",
+    "cf-challenge-platform",
+    "just a moment",
+]
+
+
+def _is_cloudflare_blocked(response) -> str | None:
+    """Check if response is a Cloudflare block/challenge page.
+    Returns block reason string or None if not blocked."""
+    # 403 with CF challenge
+    if response.status_code == 403:
+        body = response.text.lower()
+        for sig in CLOUDFLARE_BLOCK_SIGNATURES:
+            if sig in body:
+                return f"CF-403: {sig}"
+        return "CF-403: forbidden"
+
+    # 503 with CF challenge (JS challenge page)
+    if response.status_code == 503:
+        body = response.text.lower()
+        for sig in CLOUDFLARE_BLOCK_SIGNATURES:
+            if sig in body:
+                return f"CF-503: {sig}"
+
+    # Check headers for CF block indicators
+    if "cf-mitigated" in response.headers.get("server", "").lower():
+        return "CF-mitigated"
+
+    return None
+
+
 def _fetch_page(url: str, proxy_url: str) -> FetchResult:
-    """Fetch a page via proxy only. 3 retries with 180s timeout.
-    Each retry gets a new proxy IP. Detects actual proxy IP on success."""
+    """Fetch a page via proxy only. 3 retries with 150s timeout.
+    Each retry gets a new proxy IP. Detects Cloudflare blocks."""
     last_error = None
     for attempt in range(3):
         try:
             session = _make_session(proxy_url)
             response = session.get(url, timeout=150, verify=False)
-            # Retry on 5xx server errors (520, 503, etc.)
+
+            # Check for Cloudflare block
+            cf_block = _is_cloudflare_blocked(response)
+            if cf_block:
+                session.close()
+                last_error = f"BLOCKED: {cf_block}"
+                logger.warning("Attempt %d: Cloudflare blocked (%s), retrying with new proxy IP...",
+                               attempt + 1, cf_block)
+                if attempt == 2:
+                    raise requests.exceptions.ConnectionError(last_error)
+                continue
+
+            # Retry on 5xx server errors (520, etc.)
             if response.status_code >= 500:
                 session.close()
                 last_error = f"HTTP {response.status_code}"
@@ -118,10 +167,11 @@ def _fetch_page(url: str, proxy_url: str) -> FetchResult:
                 logger.warning("Attempt %d: HTTP %d, retrying with new proxy IP...",
                                attempt + 1, response.status_code)
                 continue
+
             response.raise_for_status()
-            # Detect actual proxy IP used for this request
-            proxy_ip = _detect_proxy_ip(proxy_url)
             session.close()
+            # Get proxy IP from response headers if available, else "rotated"
+            proxy_ip = response.headers.get("X-Crawlbase-IP", "proxy-rotated")
             logger.info("Fetched via proxy IP %s (attempt %d): %s",
                         proxy_ip, attempt + 1, url[:80])
             return FetchResult(html=response.text, via="proxy", ip=proxy_ip)

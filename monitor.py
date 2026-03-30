@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.config import LOCATION_NAMES, load_config
 from src.dashboard import start_dashboard
 from src.notifier import send_email, send_webhook
-from src.scraper import AvailableSlot, check_appointments, save_snapshot, build_url
+from src.scraper import AvailableSlot, check_appointments, save_snapshot, build_url, _detect_proxy_ip
 from src.stats import tracker
 
 logging.basicConfig(
@@ -198,7 +198,10 @@ def main() -> None:
     previously_found: set[str] = set()
     while True:
         try:
-            logger.info("=== Starting check cycle ===")
+            # Detect one proxy IP per cycle (not per request)
+            cycle_ip = _detect_proxy_ip(config.proxy_url)
+            logger.info("=== Starting check cycle (proxy sample IP: %s) ===", cycle_ip)
+            tracker.set_proxy_ip(cycle_ip)
             slots = run_check()
 
             # Only notify on newly discovered slots (keyed by location+date)
