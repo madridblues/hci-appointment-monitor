@@ -53,8 +53,20 @@ class Config:
     webhook_url: str = ""
     webhook_headers: str = ""
 
+    # Telegram
+    telegram_enabled: bool = False
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+
     # Proxy
     proxy_url: str = ""
+
+    # Peak hours adaptive interval
+    peak_interval: int = 120       # seconds (2 minutes) during peak hours
+    offpeak_interval: int = 300    # seconds (5 minutes) off-peak
+    # Peak hours: 4:00-13:00 UTC = 9:30-18:30 IST = 5:00-14:00 BST
+    peak_start_utc: int = 4       # hour UTC
+    peak_end_utc: int = 13        # hour UTC
 
     # Dashboard
     dashboard_enabled: bool = True
@@ -102,7 +114,14 @@ def load_config() -> Config:
         webhook_enabled=_bool(os.getenv("WEBHOOK_ENABLED", "false")),
         webhook_url=os.getenv("WEBHOOK_URL", ""),
         webhook_headers=os.getenv("WEBHOOK_HEADERS", ""),
+        telegram_enabled=_bool(os.getenv("TELEGRAM_ENABLED", "false")),
+        telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
+        telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
         proxy_url=os.getenv("PROXY_URL", ""),
+        peak_interval=int(os.getenv("PEAK_INTERVAL_SECONDS", "120")),
+        offpeak_interval=int(os.getenv("OFFPEAK_INTERVAL_SECONDS", "300")),
+        peak_start_utc=int(os.getenv("PEAK_START_UTC", "4")),
+        peak_end_utc=int(os.getenv("PEAK_END_UTC", "13")),
         dashboard_enabled=_bool(os.getenv("DASHBOARD_ENABLED", "true")),
         dashboard_host=os.getenv("DASHBOARD_HOST", Config.dashboard_host),
         dashboard_port=int(os.getenv("PORT", os.getenv("DASHBOARD_PORT", str(Config.dashboard_port)))),

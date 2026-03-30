@@ -15,7 +15,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from src.config import LOCATION_NAMES, load_config
 from src.dashboard import start_dashboard
-from src.notifier import send_email, send_webhook
+from datetime import datetime, timezone
+from src.notifier import send_email, send_webhook, send_telegram
 from src.scraper import AvailableSlot, check_appointments, save_snapshot, build_url, _detect_proxy_ip, health_check
 from src.stats import tracker
 
@@ -59,6 +60,18 @@ def notify(slots: list[AvailableSlot]) -> None:
         except Exception:
             tracker.record_notification("webhook", len(slots), success=False)
             logger.error("Webhook notification failed, continuing...")
+
+    if config.telegram_enabled:
+        try:
+            send_telegram(
+                slots,
+                bot_token=config.telegram_bot_token,
+                chat_id=config.telegram_chat_id,
+            )
+            tracker.record_notification("telegram", len(slots), success=True)
+        except Exception:
+            tracker.record_notification("telegram", len(slots), success=False)
+            logger.error("Telegram notification failed, continuing...")
 
 
 def check_location(location_id: str, months: list[str], year: str,
@@ -116,6 +129,14 @@ def check_location(location_id: str, months: list[str], year: str,
     return location_slots
 
 
+def get_check_interval(config) -> int:
+    """Return check interval based on time of day (peak vs off-peak)."""
+    now_utc = datetime.now(timezone.utc).hour
+    if config.peak_start_utc <= now_utc < config.peak_end_utc:
+        return config.peak_interval
+    return config.offpeak_interval
+
+
 def run_check() -> list[AvailableSlot]:
     """Run checks across all locations concurrently."""
     config = load_config()
@@ -170,9 +191,14 @@ def main() -> None:
         len(config.location_ids), ", ".join(location_names),
     )
     logger.info(
-        "Months: %s/%s | Type: %s | Interval: %ds | Email: %s | Webhook: %s | Proxy: ON",
+        "Months: %s/%s | Type: %s | Peak: %ds (%d-%dUTC) | Off-peak: %ds | Proxy: ON",
         ",".join(config.monitor_months), config.year, config.apt_type,
-        config.check_interval, config.email_enabled, config.webhook_enabled,
+        config.peak_interval, config.peak_start_utc, config.peak_end_utc,
+        config.offpeak_interval,
+    )
+    logger.info(
+        "Notifications: Email=%s | Webhook=%s | Telegram=%s",
+        config.email_enabled, config.webhook_enabled, config.telegram_enabled,
     )
 
     # Start dashboard
@@ -208,10 +234,12 @@ def main() -> None:
             tracker.record_health_check(hc)
             tracker.set_proxy_ip(hc.get("proxy_ip", "unknown"))
 
+            interval = get_check_interval(config)
+
             if hc["status"] not in ("up",):
-                logger.warning("=== Site not available: %s (%s) — skipping cycle ===",
-                               hc["status"], hc.get("error") or hc.get("blocked") or "")
-                time.sleep(config.check_interval)
+                logger.warning("=== Site not available: %s (%s) — skipping cycle, next in %ds ===",
+                               hc["status"], hc.get("error") or hc.get("blocked") or "", interval)
+                time.sleep(interval)
                 continue
 
             logger.info("=== Site UP (%s, %ss) — starting check cycle (proxy IP: %s) ===",
@@ -245,8 +273,10 @@ def main() -> None:
                 previously_found -= stale
                 logger.info("Removed %d stale slot(s) from tracking", len(stale))
 
-            logger.info("=== Check cycle complete. %d available, next in %ds ===",
-                        len(slots), config.check_interval)
+            now_utc = datetime.now(timezone.utc).hour
+            mode = "PEAK" if config.peak_start_utc <= now_utc < config.peak_end_utc else "OFF-PEAK"
+            logger.info("=== Check cycle complete. %d available | %s mode | next in %ds ===",
+                        len(slots), mode, interval)
 
         except KeyboardInterrupt:
             logger.info("Stopped by user.")
@@ -255,7 +285,8 @@ def main() -> None:
             logger.exception("Unexpected error during check")
 
         try:
-            time.sleep(config.check_interval)
+            interval = get_check_interval(config)
+            time.sleep(interval)
         except KeyboardInterrupt:
             logger.info("Stopped by user.")
             sys.exit(0)

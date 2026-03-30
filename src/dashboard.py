@@ -80,6 +80,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .detail-value { color: #e2e8f0; text-align: right; word-break: break-all; max-width: 400px; }
   .detail-url { color: #60a5fa; text-decoration: none; font-size: 0.75rem; }
   .detail-url:hover { text-decoration: underline; }
+  .book-btn { display: inline-block; background: #166534; color: #4ade80; padding: 4px 12px; border-radius: 6px; text-decoration: none; font-size: 0.75rem; font-weight: 600; margin-top: 4px; }
+  .book-btn:hover { background: #15803d; color: #fff; }
+  .alarm-bar { background: #7f1d1d; border: 2px solid #f87171; border-radius: 12px; padding: 16px 24px; margin-bottom: 24px; display: none; animation: pulse 1s infinite; }
+  .alarm-bar.active { display: flex; align-items: center; justify-content: space-between; }
+  .alarm-text { font-size: 1.1rem; font-weight: 700; color: #fbbf24; }
+  .alarm-dismiss { background: #475569; border: none; color: #e2e8f0; padding: 6px 16px; border-radius: 8px; cursor: pointer; font-size: 0.8rem; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.7; } }
 </style>
 </head>
 <body>
@@ -95,7 +102,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <div class="container">
   <div class="refresh-bar">
     <span style="color:#64748b;font-size:0.7rem;">Auto-refreshes every 10s</span>
+    <span id="mode-info" style="color:#64748b;font-size:0.7rem;"></span>
     <button class="refresh-btn" onclick="loadStats()">Refresh Now</button>
+  </div>
+
+  <div class="alarm-bar" id="alarm-bar">
+    <span class="alarm-text" id="alarm-text">SLOTS AVAILABLE!</span>
+    <button class="alarm-dismiss" onclick="dismissAlarm()">Dismiss</button>
   </div>
 
   <div class="grid" id="stat-cards"></div>
@@ -109,7 +122,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <h2>Found Log (Slots Discovered)</h2>
     <div style="overflow-x:auto">
       <table>
-        <thead><tr><th>Found At</th><th>Location</th><th>Date</th><th>Available Time Slots</th><th>Via</th><th>IP</th></tr></thead>
+        <thead><tr><th>Found At</th><th>Location</th><th>Date</th><th>Available Time Slots</th><th>Via</th><th>IP</th><th>Action</th></tr></thead>
         <tbody id="found-log"></tbody>
       </table>
     </div>
@@ -192,12 +205,14 @@ function renderLocations(locations) {
     if (hasSlots) {
       html += '<div class="slot-grid">';
       for (const s of slots) {
+        var bookUrl = 'https://appointment.hcilondon.gov.in/appointment.php?month=' + s.month + '&year=' + s.year + '&apttype=Submission&locationid=' + loc.location_id + '&serviceid=29&date=' + s.date;
         html += '<div class="slot-card"><div class="slot-date">' + s.date + '/' + s.month + '/' + s.year + '</div>';
         const times = s.time_slots || [];
         if (times.length) {
           for (const t of times)
             html += '<div class="slot-time"><span>' + t.time + '</span><span class="slot-count">' + t.available + ' slot(s)</span></div>';
         }
+        html += '<a class="book-btn" href="' + bookUrl + '" target="_blank">BOOK NOW</a>';
         html += '</div>';
       }
       html += '</div>';
@@ -210,17 +225,19 @@ function renderLocations(locations) {
 }
 
 function renderFoundLog(log) {
-  if (!log || log.length === 0) return '<tr><td colspan="6" class="no-data">No slots found yet</td></tr>';
+  if (!log || log.length === 0) return '<tr><td colspan="7" class="no-data">No slots found yet</td></tr>';
   var items = log.slice().reverse().slice(0, 50);
   _lastFound = items;
   return items.map((f, i) => {
     const times = (f.time_slots || []).map(t => t.time + ' (' + t.available + ')').join(', ');
     const via = f.fetched_via || '-';
     const ip = f.fetched_ip || '-';
+    var bookUrl = 'https://appointment.hcilondon.gov.in/appointment.php?month=' + f.month + '&year=' + f.year + '&apttype=Submission&locationid=' + f.location_id + '&serviceid=29&date=' + f.date;
     return '<tr class="found-row clickable" onclick="showFoundDetail(' + i + ')"><td>' + fmt(f.timestamp) + '</td><td>' + (f.location_name||f.location_id) +
       '</td><td>' + f.date + '/' + f.month + '/' + f.year +
       '</td><td class="found-times">' + (times || '-') +
-      '</td><td>' + via + '</td><td style="font-size:0.65rem;color:#94a3b8">' + ip + '</td></tr>';
+      '</td><td>' + via + '</td><td style="font-size:0.65rem;color:#94a3b8">' + ip +
+      '</td><td><a class="book-btn" href="' + bookUrl + '" target="_blank" onclick="event.stopPropagation()">BOOK</a></td></tr>';
   }).join('');
 }
 
@@ -237,6 +254,15 @@ function loadStats() {
       document.getElementById('proxy-info').innerHTML = '<span class="dot ' + (pip ? 'dot-green' : 'dot-red') + '"></span> Proxy: ' + (s.proxy_ip || 'none');
       document.getElementById('started-info').textContent = 'Started: ' + fmt(s.started_at);
       document.getElementById('last-check-info').textContent = 'Last: ' + fmtTime(s.last_check_at);
+
+      // Check for new slots and trigger alarm
+      checkAlarm(s.total_slots_found);
+
+      // Mode indicator
+      var now = new Date();
+      var utcHour = now.getUTCHours();
+      var isPeak = utcHour >= 4 && utcHour < 13;
+      document.getElementById('mode-info').textContent = isPeak ? 'PEAK MODE (every 2 min)' : 'OFF-PEAK (every 5 min)';
 
       // Cards
       document.getElementById('stat-cards').innerHTML =
@@ -291,6 +317,52 @@ function loadStats() {
 
 var _lastChecks = [];
 var _lastFound = [];
+var _alarmDismissed = false;
+var _prevSlotsFound = 0;
+var _alarmAudioCtx = null;
+
+function playAlarm() {
+  // Play a loud repeating beep using Web Audio API (no external files needed)
+  try {
+    if (!_alarmAudioCtx) _alarmAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    var ctx = _alarmAudioCtx;
+    function beep(freq, startTime, duration) {
+      var osc = ctx.createOscillator();
+      var gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.frequency.value = freq;
+      osc.type = 'square';
+      gain.gain.value = 0.3;
+      osc.start(startTime);
+      osc.stop(startTime + duration);
+    }
+    // Play 5 urgent beeps
+    for (var i = 0; i < 5; i++) {
+      beep(880, ctx.currentTime + i * 0.3, 0.15);
+    }
+  } catch(e) { console.log('Audio not available'); }
+}
+
+function dismissAlarm() {
+  _alarmDismissed = true;
+  document.getElementById('alarm-bar').classList.remove('active');
+}
+
+function checkAlarm(totalSlotsFound) {
+  if (totalSlotsFound > _prevSlotsFound && totalSlotsFound > 0 && !_alarmDismissed) {
+    document.getElementById('alarm-bar').classList.add('active');
+    document.getElementById('alarm-text').textContent = 'SLOTS AVAILABLE! (' + totalSlotsFound + ' found)';
+    playAlarm();
+    // Also try browser notification
+    if (Notification && Notification.permission === 'granted') {
+      new Notification('HCI Appointment Available!', { body: totalSlotsFound + ' slot(s) found. Book now!' });
+    } else if (Notification && Notification.permission !== 'denied') {
+      Notification.requestPermission();
+    }
+  }
+  _prevSlotsFound = totalSlotsFound;
+}
 
 function closeModal() {
   document.getElementById('detail-modal').classList.remove('show');

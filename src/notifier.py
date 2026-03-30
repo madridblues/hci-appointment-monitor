@@ -1,22 +1,35 @@
-"""Email and webhook notification handlers."""
+"""Email, webhook, and Telegram notification handlers."""
 
 import json
 import logging
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from urllib.parse import urlencode
 
 import requests
 
 from src.config import LOCATION_NAMES
-from src.scraper import AvailableSlot
+from src.scraper import AvailableSlot, BASE_URL
 
 logger = logging.getLogger(__name__)
 
 
+def build_booking_url(slot: AvailableSlot) -> str:
+    """Build a direct booking URL that opens the date page with time slots visible."""
+    params = {
+        "month": slot.month,
+        "year": slot.year,
+        "apttype": slot.apt_type,
+        "locationid": slot.location_id,
+        "serviceid": slot.service_id,
+        "date": slot.date,
+    }
+    return f"{BASE_URL}?{urlencode(params)}"
+
+
 def _build_message(slots: list[AvailableSlot]) -> tuple[str, str]:
-    """Build plain text and HTML notification messages."""
-    # Group by location, then by month
+    """Build plain text and HTML notification messages with direct booking links."""
     by_location: dict[str, list[AvailableSlot]] = {}
     for slot in slots:
         loc = LOCATION_NAMES.get(slot.location_id, f"Location {slot.location_id}")
@@ -32,6 +45,7 @@ def _build_message(slots: list[AvailableSlot]) -> tuple[str, str]:
         html_parts.append(f"<h3>{location}</h3>")
 
         for slot in loc_slots:
+            booking_url = build_booking_url(slot)
             lines.append(f"  Date: {slot.date}/{slot.month}/{slot.year}")
             html_parts.append(
                 f"<p><strong>Date {slot.date}/{slot.month}/{slot.year}:</strong><br>"
@@ -42,14 +56,65 @@ def _build_message(slots: list[AvailableSlot]) -> tuple[str, str]:
                     html_parts.append(
                         f"&nbsp;&nbsp;{ts.time} — {ts.available} slot(s)<br>"
                     )
-            lines.append(f"  Book: {slot.url}")
-            html_parts.append(f'<a href="{slot.url}">Book Now &rarr;</a></p>')
+            lines.append(f"  BOOK NOW: {booking_url}")
+            html_parts.append(
+                f'<a href="{booking_url}" style="color:#4ade80;font-weight:bold;">'
+                f'BOOK NOW &rarr;</a></p>'
+            )
 
         lines.append("")
 
     plain = "\n".join(lines)
     html = "\n".join(html_parts)
     return plain, html
+
+
+def _build_telegram_message(slots: list[AvailableSlot]) -> str:
+    """Build a Telegram message with direct booking links (Markdown format)."""
+    by_location: dict[str, list[AvailableSlot]] = {}
+    for slot in slots:
+        loc = LOCATION_NAMES.get(slot.location_id, f"Location {slot.location_id}")
+        by_location.setdefault(loc, []).append(slot)
+
+    parts = ["*APPOINTMENT SLOTS AVAILABLE*\n"]
+
+    for location, loc_slots in by_location.items():
+        parts.append(f"*{location}*")
+
+        for slot in loc_slots:
+            booking_url = build_booking_url(slot)
+            parts.append(f"  Date: *{slot.date}/{slot.month}/{slot.year}*")
+            if slot.time_slots:
+                for ts in slot.time_slots:
+                    parts.append(f"    {ts.time} ({ts.available} slots)")
+            parts.append(f"  [BOOK NOW]({booking_url})\n")
+
+    return "\n".join(parts)
+
+
+def send_telegram(
+    slots: list[AvailableSlot],
+    bot_token: str,
+    chat_id: str,
+) -> None:
+    """Send a Telegram notification with direct booking links."""
+    message = _build_telegram_message(slots)
+
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True,
+    }
+
+    try:
+        resp = requests.post(url, json=payload, timeout=15)
+        resp.raise_for_status()
+        logger.info("Telegram notification sent to chat %s", chat_id)
+    except Exception:
+        logger.exception("Failed to send Telegram notification")
+        raise
 
 
 def send_email(
