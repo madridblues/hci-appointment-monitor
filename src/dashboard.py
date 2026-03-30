@@ -445,6 +445,22 @@ def _check_auth(handler):
 
 class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        # Health/keep-alive endpoint — no auth needed (for Render and uptime monitors)
+        if self.path == "/healthz":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"ok")
+            return
+
+        # Keep-alive self-ping — no auth needed
+        if self.headers.get("X-Keep-Alive") == "true":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"pong")
+            return
+
         if not _check_ip(self):
             self.send_response(403)
             self.send_header("Content-Type", "text/plain")
@@ -492,9 +508,33 @@ class DashboardHandler(BaseHTTPRequestHandler):
         pass
 
 
+def _keep_alive_pinger(render_url: str):
+    """Self-ping every 10 min via external URL to prevent Render free tier spin-down."""
+    import time as _time
+    import urllib.request
+    while True:
+        _time.sleep(600)  # 10 minutes
+        try:
+            ping_url = render_url.rstrip("/") + "/healthz"
+            req = urllib.request.Request(ping_url)
+            req.add_header("X-Keep-Alive", "true")
+            urllib.request.urlopen(req, timeout=10)
+            logger.info("Keep-alive ping sent to %s", render_url)
+        except Exception:
+            logger.debug("Keep-alive ping failed (non-critical)")
+
+
 def start_dashboard(host="0.0.0.0", port=8080):
     server = HTTPServer((host, port), DashboardHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     logger.info("Stats Tracker at http://%s:%d", host, port)
+    # Start keep-alive pinger to prevent Render free tier spin-down
+    render_url = os.getenv("RENDER_EXTERNAL_URL", "")
+    if render_url:
+        ka_thread = threading.Thread(target=_keep_alive_pinger, args=(render_url,), daemon=True)
+        ka_thread.start()
+        logger.info("Keep-alive pinger started (every 10 min)")
+    else:
+        logger.info("RENDER_EXTERNAL_URL not set — keep-alive pinger disabled")
     return server
