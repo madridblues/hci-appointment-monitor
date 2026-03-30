@@ -3,6 +3,7 @@
 import logging
 import re
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -18,53 +19,7 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://appointment.hcilondon.gov.in/appointment.php"
 
-_direct_ip: str = ""
-
-
-def get_random_user_agent(token: str = "") -> str:
-    """Get a random user agent from Crawlbase API, with fallback."""
-    default = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/131.0.0.0 Safari/537.36"
-    )
-    if not token:
-        return default
-    try:
-        resp = requests.get(
-            f"https://api.crawlbase.com/user_agents?token={token}",
-            timeout=5,
-        )
-        data = resp.json()
-        if data.get("success") and data.get("agents"):
-            return data["agents"][0]
-    except Exception:
-        pass
-    return default
-
-
-def get_direct_ip() -> str:
-    """Detect the direct outgoing IP address."""
-    global _direct_ip
-    if _direct_ip:
-        return _direct_ip
-    try:
-        resp = requests.get("https://api.ipify.org?format=json", timeout=10)
-        _direct_ip = resp.json().get("ip", "unknown")
-    except Exception:
-        _direct_ip = "unknown"
-    return _direct_ip
-
-
-def get_proxy_ip(proxy_url: str) -> str:
-    """Detect outgoing IP through the proxy."""
-    try:
-        proxies = {"http": proxy_url, "https": proxy_url}
-        resp = requests.get("https://api.ipify.org?format=json", timeout=15,
-                            proxies=proxies, verify=False)
-        return resp.json().get("ip", "unknown")
-    except Exception:
-        return "unknown"
+BATCH_SIZE = 5  # Number of green dates to check concurrently per batch
 
 
 @dataclass
@@ -88,6 +43,18 @@ class AvailableSlot:
     page_snapshot: str = "" # raw HTML snapshot of the date page
 
 
+@dataclass
+class CheckResult:
+    """Result of checking a month for appointments."""
+    slots: list[AvailableSlot]
+    fetched_via: str
+    fetched_ip: str
+    response_snippet: str = ""  # first 500 chars for debugging
+    green_dates_found: int = 0
+    green_dates_list: list[str] = field(default_factory=list)
+    dates_checked: int = 0      # how many date pages we actually fetched
+
+
 def build_url(month: str, year: str, apt_type: str, location_id: str, service_id: str, date: str = "") -> str:
     params = {
         "month": month,
@@ -105,68 +72,170 @@ class FetchResult:
     """Result of a page fetch with metadata."""
     def __init__(self, html: str, via: str, ip: str = ""):
         self.html = html
-        self.via = via    # "proxy" or "direct"
-        self.ip = ip      # IP used for the request
+        self.via = via
+        self.ip = ip
 
 
-def _make_session(proxy_url: str = "", crawlbase_token: str = "") -> requests.Session:
-    """Create a fresh browser-like session."""
+def _make_session(proxy_url: str) -> requests.Session:
+    """Create a fresh browser-like session routed through proxy."""
     session = requests.Session()
-
-    if proxy_url:
-        # Blank User-Agent → Crawlbase auto-rotates it
-        session.headers.update({
-            "User-Agent": "",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-GB,en;q=0.5",
-        })
-        session.proxies = {"http": proxy_url, "https": proxy_url}
-    else:
-        ua = get_random_user_agent(crawlbase_token)
-        session.headers.update({
-            "User-Agent": ua,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-            "Sec-Ch-Ua": '"Chromium";v="131", "Not_A Brand";v="24"',
-            "Sec-Ch-Ua-Mobile": "?0",
-            "Sec-Ch-Ua-Platform": '"Windows"',
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-            "Upgrade-Insecure-Requests": "1",
-        })
+    # Blank User-Agent → Crawlbase auto-rotates it
+    session.headers.update({
+        "User-Agent": "",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-GB,en;q=0.5",
+    })
+    session.proxies = {"http": proxy_url, "https": proxy_url}
     return session
 
 
-def _fetch_page(url: str, proxy_url: str = "", crawlbase_token: str = "") -> FetchResult:
-    """Fetch a page via proxy (required) with retries. 180s timeout for slow sites."""
+def _detect_proxy_ip(proxy_url: str) -> str:
+    """Quick IP detection through proxy via ipify."""
+    try:
+        session = requests.Session()
+        session.proxies = {"http": proxy_url, "https": proxy_url}
+        resp = session.get("https://api.ipify.org?format=text", timeout=15, verify=False)
+        session.close()
+        return resp.text.strip()
+    except Exception:
+        return "unknown"
 
+
+def _fetch_page(url: str, proxy_url: str) -> FetchResult:
+    """Fetch a page via proxy only. 3 retries with 180s timeout.
+    Each retry gets a new proxy IP. Detects actual proxy IP on success."""
+    last_error = None
     for attempt in range(3):
         try:
-            session = _make_session(proxy_url, crawlbase_token)
-            verify_ssl = not bool(proxy_url)
-            response = session.get(url, timeout=180, verify=verify_ssl)
+            session = _make_session(proxy_url)
+            response = session.get(url, timeout=180, verify=False)
+            # Retry on 5xx server errors (520, 503, etc.)
+            if response.status_code >= 500:
+                session.close()
+                last_error = f"HTTP {response.status_code}"
+                if attempt == 2:
+                    response.raise_for_status()
+                logger.warning("Attempt %d: HTTP %d, retrying with new proxy IP...",
+                               attempt + 1, response.status_code)
+                continue
             response.raise_for_status()
-            ip = "rotating"
-            if proxy_url:
-                # Don't detect IP each time (slow) - just note it's proxied
-                ip = "proxy-rotated"
-            else:
-                ip = get_direct_ip()
+            # Detect actual proxy IP used for this request
+            proxy_ip = _detect_proxy_ip(proxy_url)
             session.close()
-            via = "proxy" if proxy_url else "direct"
-            logger.info("Fetched via %s (attempt %d)", via, attempt + 1)
-            return FetchResult(html=response.text, via=via, ip=ip)
+            logger.info("Fetched via proxy IP %s (attempt %d): %s",
+                        proxy_ip, attempt + 1, url[:80])
+            return FetchResult(html=response.text, via="proxy", ip=proxy_ip)
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_error = str(e)
             if attempt == 2:
                 raise
-            logger.warning("Attempt %d failed (%s), retrying...", attempt + 1, e)
+            logger.warning("Attempt %d failed (%s), retrying with new proxy IP...",
+                           attempt + 1, type(e).__name__)
             continue
-    raise requests.exceptions.ConnectionError("All fetch attempts failed")
+    raise requests.exceptions.ConnectionError(f"All fetch attempts failed: {last_error}")
+
+
+def _fetch_date_page(date_str: str, month: str, year: str, apt_type: str,
+                     location_id: str, service_id: str, proxy_url: str) -> AvailableSlot | None:
+    """Fetch a single date page and parse time slots. Returns AvailableSlot or None."""
+    date_url = build_url(month, year, apt_type, location_id, service_id, date=date_str)
+    try:
+        result = _fetch_page(date_url, proxy_url)
+        time_slots = _parse_time_slots(result.html)
+
+        if time_slots:
+            slot_summary = ", ".join(f"{ts.time} ({ts.available})" for ts in time_slots)
+            logger.info("  Date %s: %s", date_str, slot_summary)
+            return AvailableSlot(
+                date=date_str, month=month, year=year,
+                apt_type=apt_type, location_id=location_id,
+                service_id=service_id, url=date_url,
+                time_slots=time_slots,
+                fetched_via=result.via, fetched_ip=result.ip,
+                page_snapshot=result.html,
+            )
+        else:
+            logger.info("  Date %s: no available time slots", date_str)
+            return None
+    except Exception:
+        logger.exception("  Error checking date %s", date_str)
+        return None
+
+
+def check_appointments(
+    month: str,
+    year: str,
+    apt_type: str = "Submission",
+    location_id: str = "8",
+    service_id: str = "29",
+    proxy_url: str = "",
+) -> CheckResult:
+    """
+    Fetch calendar, find green dates, then check them in batches of 5
+    concurrently via proxy. Stops after first batch that finds slots.
+    """
+    url = build_url(month, year, apt_type, location_id, service_id)
+    logger.info("Checking calendar: %s", url)
+
+    # Step 1: Fetch calendar page
+    result = _fetch_page(url, proxy_url)
+    snippet = result.html[:500] if result.html else ""
+    bookable_dates = _parse_bookable_dates(result.html, month)
+
+    if not bookable_dates:
+        logger.info("No green dates for %s/%s (via %s)", month, year, result.via)
+        return CheckResult(
+            slots=[], fetched_via=result.via, fetched_ip=result.ip,
+            response_snippet=snippet, green_dates_found=0,
+        )
+
+    logger.info("Found %d green date(s) for %s/%s, checking in batches of %d...",
+                len(bookable_dates), month, year, BATCH_SIZE)
+
+    # Step 2: Check dates in batches of BATCH_SIZE, all concurrent within batch
+    all_available: list[AvailableSlot] = []
+    dates_checked = 0
+
+    for batch_start in range(0, len(bookable_dates), BATCH_SIZE):
+        batch = bookable_dates[batch_start:batch_start + BATCH_SIZE]
+        batch_num = (batch_start // BATCH_SIZE) + 1
+        logger.info("  Batch %d: checking dates %s", batch_num, batch)
+
+        # Fetch all dates in this batch concurrently
+        with ThreadPoolExecutor(max_workers=len(batch)) as executor:
+            futures = {
+                executor.submit(
+                    _fetch_date_page, date_str, month, year,
+                    apt_type, location_id, service_id, proxy_url,
+                ): date_str
+                for date_str in batch
+            }
+            for future in as_completed(futures):
+                dates_checked += 1
+                slot = future.result()
+                if slot:
+                    all_available.append(slot)
+
+        # If we found slots in this batch, stop (no need to check more)
+        if all_available:
+            logger.info("  Found %d date(s) with slots in batch %d, stopping",
+                        len(all_available), batch_num)
+            break
+        else:
+            logger.info("  Batch %d: no slots found, trying next batch", batch_num)
+
+    if all_available:
+        logger.info("Found %d date(s) with time slots for %s/%s",
+                     len(all_available), month, year)
+    else:
+        logger.info("No available time slots across %d dates for %s/%s",
+                     dates_checked, month, year)
+
+    return CheckResult(
+        slots=all_available, fetched_via=result.via, fetched_ip=result.ip,
+        response_snippet=snippet, green_dates_found=len(bookable_dates),
+        green_dates_list=bookable_dates, dates_checked=dates_checked,
+    )
 
 
 def _parse_time_slots(html: str) -> list[TimeSlot]:
@@ -207,87 +276,6 @@ def _parse_time_slots(html: str) -> list[TimeSlot]:
             slots.append(TimeSlot(time=time_str, available=available_count))
 
     return slots
-
-
-@dataclass
-class CheckResult:
-    """Result of checking a month for appointments."""
-    slots: list['AvailableSlot']
-    fetched_via: str
-    fetched_ip: str
-    response_snippet: str = ""  # first 500 chars for debugging
-    green_dates_found: int = 0
-
-
-def check_appointments(
-    month: str,
-    year: str,
-    apt_type: str = "Submission",
-    location_id: str = "8",
-    service_id: str = "29",
-    proxy_url: str = "",
-    crawlbase_token: str = "",
-) -> CheckResult:
-    """
-    Fetch the appointment page, find bookable dates, then fetch each date's
-    page to get available time slots. Returns CheckResult with slots and
-    fetch metadata (via/ip) even when no slots found.
-    """
-    url = build_url(month, year, apt_type, location_id, service_id)
-    logger.info("Checking appointments at: %s", url)
-
-    result = _fetch_page(url, proxy_url, crawlbase_token)
-    snippet = result.html[:500] if result.html else ""
-    bookable_dates = _parse_bookable_dates(result.html, month)
-
-    if not bookable_dates:
-        logger.info("No bookable dates for %s/%s (via %s, IP: %s)",
-                     month, year, result.via, result.ip)
-        return CheckResult(slots=[], fetched_via=result.via, fetched_ip=result.ip,
-                           response_snippet=snippet, green_dates_found=0)
-
-    logger.info("Found %d bookable date(s) for %s/%s (via %s, IP: %s), checking time slots...",
-                len(bookable_dates), month, year, result.via, result.ip)
-
-    available: list[AvailableSlot] = []
-    for date_str in bookable_dates:
-        date_url = build_url(month, year, apt_type, location_id, service_id, date=date_str)
-        try:
-            date_result = _fetch_page(date_url, proxy_url, crawlbase_token)
-            time_slots = _parse_time_slots(date_result.html)
-
-            if time_slots:
-                slot_summary = ", ".join(f"{ts.time} ({ts.available})" for ts in time_slots)
-                logger.info("  Date %s: %s (via %s, IP: %s)",
-                            date_str, slot_summary, date_result.via, date_result.ip)
-                available.append(
-                    AvailableSlot(
-                        date=date_str,
-                        month=month,
-                        year=year,
-                        apt_type=apt_type,
-                        location_id=location_id,
-                        service_id=service_id,
-                        url=date_url,
-                        time_slots=time_slots,
-                        fetched_via=date_result.via,
-                        fetched_ip=date_result.ip,
-                        page_snapshot=date_result.html,
-                    )
-                )
-            else:
-                logger.info("  Date %s: no available time slots (fully booked)", date_str)
-        except Exception:
-            logger.exception("  Error checking time slots for date %s", date_str)
-
-    if available:
-        logger.info("Found %d date(s) with available time slots for %s/%s",
-                     len(available), month, year)
-    else:
-        logger.info("No available time slots for %s/%s", month, year)
-
-    return CheckResult(slots=available, fetched_via=result.via, fetched_ip=result.ip,
-                       response_snippet=snippet, green_dates_found=len(bookable_dates))
 
 
 def _parse_bookable_dates(html: str, month: str) -> list[str]:
@@ -355,7 +343,7 @@ def _parse_bookable_dates(html: str, month: str) -> list[str]:
 SNAPSHOTS_DIR = Path(__file__).resolve().parent.parent / "data" / "snapshots"
 
 
-def save_snapshot(slot: 'AvailableSlot') -> str:
+def save_snapshot(slot: AvailableSlot) -> str:
     """Save the HTML snapshot of a found slot. Returns the snapshot filename."""
     SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")

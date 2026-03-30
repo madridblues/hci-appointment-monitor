@@ -32,11 +32,11 @@ class Config:
     location_ids: list[str] = field(default_factory=lambda: [
         "3", "4", "8", "9", "10", "14", "22", "23",
     ])
-    monitor_months: list[str] = field(default_factory=lambda: ["03", "04"])
+    monitor_months: list[str] = field(default_factory=lambda: ["04", "05"])
     year: str = "2026"
 
     # Monitoring
-    check_interval: int = 120  # seconds (2 minutes)
+    check_interval: int = 300  # seconds (5 minutes)
 
     # Email
     email_enabled: bool = False
@@ -55,7 +55,6 @@ class Config:
 
     # Proxy
     proxy_url: str = ""
-    crawlbase_token: str = ""
 
     # Dashboard
     dashboard_enabled: bool = True
@@ -80,7 +79,7 @@ def load_config() -> Config:
     location_ids = _list(location_ids_raw)
 
     # Months to monitor
-    default_months = "03,04"
+    default_months = "04,05"
     monitor_months_raw = os.getenv("MONITOR_MONTHS", default_months)
     monitor_months = _list(monitor_months_raw)
 
@@ -104,7 +103,6 @@ def load_config() -> Config:
         webhook_url=os.getenv("WEBHOOK_URL", ""),
         webhook_headers=os.getenv("WEBHOOK_HEADERS", ""),
         proxy_url=os.getenv("PROXY_URL", ""),
-        crawlbase_token=os.getenv("CRAWLBASE_TOKEN", ""),
         dashboard_enabled=_bool(os.getenv("DASHBOARD_ENABLED", "true")),
         dashboard_host=os.getenv("DASHBOARD_HOST", Config.dashboard_host),
         dashboard_port=int(os.getenv("PORT", os.getenv("DASHBOARD_PORT", str(Config.dashboard_port)))),

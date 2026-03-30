@@ -27,6 +27,7 @@ class CheckRecord:
     request_url: str = ""
     response_snippet: str = ""  # first 500 chars of response for debugging
     green_dates_found: int = 0  # how many green dates on calendar
+    dates_checked: int = 0      # how many date pages were fetched
 
 
 @dataclass
@@ -111,7 +112,8 @@ class StatsTracker:
                      error: str = "", location_id: str = "", location_name: str = "",
                      slot_details: list[dict] | None = None, proxy_ip: str = "",
                      fetched_via: str = "", fetched_ip: str = "", request_url: str = "",
-                     response_snippet: str = "", green_dates_found: int = 0):
+                     response_snippet: str = "", green_dates_found: int = 0,
+                     dates_checked: int = 0):
         with self._lock:
             now = datetime.now().isoformat()
             self._stats.total_checks += 1
@@ -179,6 +181,7 @@ class StatsTracker:
                 request_url=request_url,
                 response_snippet=response_snippet,
                 green_dates_found=green_dates_found,
+                dates_checked=dates_checked,
             )
             self._stats.check_history.append(asdict(record))
             self._stats.check_history = self._stats.check_history[-200:]

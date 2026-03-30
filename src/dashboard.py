@@ -279,12 +279,14 @@ function showCheckDetail(idx) {
   document.getElementById('modal-title').textContent = (c.location_name || c.location_id) + ' — ' + c.month + '/' + c.year;
   var snippet = c.response_snippet || 'N/A';
   var greenDates = c.green_dates_found || 0;
+  var datesChecked = c.dates_checked || '-';
   document.getElementById('modal-body').innerHTML =
     '<div class="detail-row"><span class="detail-label">Timestamp</span><span class="detail-value">' + fmt(c.timestamp) + '</span></div>' +
     '<div class="detail-row"><span class="detail-label">Fetched Via</span><span class="detail-value">' + via + '</span></div>' +
     '<div class="detail-row"><span class="detail-label">Proxy IP</span><span class="detail-value">' + ip + '</span></div>' +
-    '<div class="detail-row"><span class="detail-label">Green Dates Found</span><span class="detail-value">' + greenDates + '</span></div>' +
-    '<div class="detail-row"><span class="detail-label">Slots Found</span><span class="detail-value">' + c.slots_found + '</span></div>' +
+    '<div class="detail-row"><span class="detail-label">Green Dates on Calendar</span><span class="detail-value">' + greenDates + '</span></div>' +
+    '<div class="detail-row"><span class="detail-label">Date Pages Checked</span><span class="detail-value">' + datesChecked + ' (batch of 5)</span></div>' +
+    '<div class="detail-row"><span class="detail-label">Slots Found</span><span class="detail-value ' + (c.slots_found > 0 ? 'green' : '') + '">' + c.slots_found + '</span></div>' +
     '<div class="detail-row"><span class="detail-label">Available Dates</span><span class="detail-value">' + dates + '</span></div>' +
     '<div class="detail-row"><span class="detail-label">Error</span><span class="detail-value ' + (c.error ? 'err' : 'ok') + '">' + err + '</span></div>' +
     '<div class="detail-row"><span class="detail-label">Request URL</span><span class="detail-value"><a class="detail-url" href="' + url + '" target="_blank">' + url + '</a></span></div>' +

@@ -4,6 +4,7 @@ HCI London Appointment Monitor
 
 Monitors multiple locations concurrently for available appointment slots
 with time information, and sends notifications via email and/or webhook.
+All requests routed through Crawlbase rotating proxy.
 """
 
 import argparse
@@ -15,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.config import LOCATION_NAMES, load_config
 from src.dashboard import start_dashboard
 from src.notifier import send_email, send_webhook
-from src.scraper import AvailableSlot, CheckResult, check_appointments, get_direct_ip, save_snapshot, build_url
+from src.scraper import AvailableSlot, check_appointments, save_snapshot, build_url
 from src.stats import tracker
 
 logging.basicConfig(
@@ -61,8 +62,7 @@ def notify(slots: list[AvailableSlot]) -> None:
 
 
 def check_location(location_id: str, months: list[str], year: str,
-                   apt_type: str, service_id: str, proxy_url: str,
-                   crawlbase_token: str = "") -> list[AvailableSlot]:
+                   apt_type: str, service_id: str, proxy_url: str) -> list[AvailableSlot]:
     """Check all months for a single location. Runs in a thread."""
     location_name = LOCATION_NAMES.get(location_id, f"Location {location_id}")
     location_slots: list[AvailableSlot] = []
@@ -77,9 +77,7 @@ def check_location(location_id: str, months: list[str], year: str,
                 location_id=location_id,
                 service_id=service_id,
                 proxy_url=proxy_url,
-                crawlbase_token=crawlbase_token,
             )
-            # Only keep slots with actual time slots
             slots_with_times = [s for s in result.slots if s.time_slots]
             location_slots.extend(slots_with_times)
 
@@ -104,6 +102,7 @@ def check_location(location_id: str, months: list[str], year: str,
                 request_url=req_url,
                 response_snippet=result.response_snippet,
                 green_dates_found=result.green_dates_found,
+                dates_checked=result.dates_checked,
             )
         except Exception as e:
             logger.exception("Error checking %s for %s/%s", location_name, month, year)
@@ -121,6 +120,10 @@ def run_check() -> list[AvailableSlot]:
     """Run checks across all locations concurrently."""
     config = load_config()
 
+    if not config.proxy_url:
+        logger.error("PROXY_URL not configured — all requests must go via proxy")
+        return []
+
     all_slots: list[AvailableSlot] = []
 
     with ThreadPoolExecutor(max_workers=len(config.location_ids)) as executor:
@@ -128,7 +131,6 @@ def run_check() -> list[AvailableSlot]:
             executor.submit(
                 check_location, loc_id, config.monitor_months, config.year,
                 config.apt_type, config.service_id, config.proxy_url,
-                config.crawlbase_token,
             ): loc_id
             for loc_id in config.location_ids
         }
@@ -152,6 +154,10 @@ def main() -> None:
 
     config = load_config()
 
+    if not config.proxy_url:
+        logger.error("PROXY_URL is required. Set it in .env or environment.")
+        sys.exit(1)
+
     if not config.email_enabled and not config.webhook_enabled:
         logger.warning(
             "No notification channels enabled. "
@@ -164,10 +170,9 @@ def main() -> None:
         len(config.location_ids), ", ".join(location_names),
     )
     logger.info(
-        "Months: %s/%s | Type: %s | Interval: %ds | Email: %s | Webhook: %s | Proxy: %s",
+        "Months: %s/%s | Type: %s | Interval: %ds | Email: %s | Webhook: %s | Proxy: ON",
         ",".join(config.monitor_months), config.year, config.apt_type,
         config.check_interval, config.email_enabled, config.webhook_enabled,
-        bool(config.proxy_url),
     )
 
     # Start dashboard
@@ -175,14 +180,7 @@ def main() -> None:
         start_dashboard(config.dashboard_host, config.dashboard_port)
 
     tracker.reset_started()
-
-    # Detect direct IP
-    try:
-        ip = get_direct_ip()
-        tracker.set_proxy_ip(ip)
-        logger.info("Server IP: %s | Proxy configured: %s", ip, bool(config.proxy_url))
-    except Exception:
-        logger.warning("Could not detect server IP")
+    tracker.set_proxy_ip("proxy-rotated")
 
     if args.once:
         slots = run_check()
@@ -213,11 +211,9 @@ def main() -> None:
                 for s in new_slots:
                     loc = LOCATION_NAMES.get(s.location_id, s.location_id)
                     times = ", ".join(f"{ts.time}({ts.available})" for ts in s.time_slots)
-                    logger.info("NEW: %s - %s/%s/%s: %s (via %s, IP: %s)",
-                                loc, s.date, s.month, s.year, times,
-                                s.fetched_via, s.fetched_ip)
+                    logger.info("NEW: %s - %s/%s/%s: %s (via %s)",
+                                loc, s.date, s.month, s.year, times, s.fetched_via)
                     previously_found.add(f"{s.location_id}/{s.month}/{s.date}/{s.year}")
-                    # Save HTML snapshot
                     try:
                         save_snapshot(s)
                     except Exception:
