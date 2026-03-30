@@ -1,13 +1,19 @@
-"""Web dashboard for monitoring stats."""
+"""Web dashboard for monitoring stats with password and IP protection."""
 
+import base64
 import json
 import logging
+import os
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from src.stats import tracker
 
 logger = logging.getLogger(__name__)
+
+# Security config from env vars
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "google123")
+ALLOWED_IPS = [ip.strip() for ip in os.getenv("ALLOWED_IPS", "82.69.40.228").split(",") if ip.strip()]
 
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -147,8 +153,59 @@ setInterval(loadStats, 30000);
 </html>"""
 
 
+def _get_client_ip(handler: BaseHTTPRequestHandler) -> str:
+    """Extract client IP, checking X-Forwarded-For for reverse proxies (Render)."""
+    forwarded = handler.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return handler.client_address[0]
+
+
+def _check_ip(handler: BaseHTTPRequestHandler) -> bool:
+    """Check if client IP is in the allowed list. Empty list = allow all."""
+    if not ALLOWED_IPS:
+        return True
+    client_ip = _get_client_ip(handler)
+    return client_ip in ALLOWED_IPS
+
+
+def _check_auth(handler: BaseHTTPRequestHandler) -> bool:
+    """Check HTTP Basic Auth against configured password."""
+    if not DASHBOARD_PASSWORD:
+        return True
+    auth_header = handler.headers.get("Authorization", "")
+    if not auth_header.startswith("Basic "):
+        return False
+    try:
+        decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+        # Accept any username with the correct password
+        _, password = decoded.split(":", 1)
+        return password == DASHBOARD_PASSWORD
+    except Exception:
+        return False
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        # IP check first
+        if not _check_ip(self):
+            client_ip = _get_client_ip(self)
+            logger.warning("Blocked request from IP: %s", client_ip)
+            self.send_response(403)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"403 Forbidden - IP not allowed")
+            return
+
+        # Password check
+        if not _check_auth(self):
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="Appointment Monitor"')
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"401 Unauthorized")
+            return
+
         if self.path == "/api/stats":
             data = json.dumps(tracker.get_stats())
             self.send_response(200)
@@ -174,5 +231,9 @@ def start_dashboard(host: str = "0.0.0.0", port: int = 8080):
     server = HTTPServer((host, port), DashboardHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    logger.info("Dashboard running at http://%s:%d", host, port)
+    if ALLOWED_IPS:
+        logger.info("Dashboard running at http://%s:%d (password protected, IPs: %s)",
+                     host, port, ", ".join(ALLOWED_IPS))
+    else:
+        logger.info("Dashboard running at http://%s:%d (password protected)", host, port)
     return server

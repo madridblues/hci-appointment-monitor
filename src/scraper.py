@@ -56,10 +56,12 @@ def _fetch_page(url: str, proxy_url: str = "") -> str:
         "Accept-Language": "en-US,en;q=0.9",
     }
     proxies = None
+    verify_ssl = True
     if proxy_url:
         proxies = {"http": proxy_url, "https": proxy_url}
+        verify_ssl = False  # proxy may intercept SSL
 
-    response = requests.get(url, headers=headers, timeout=30, proxies=proxies)
+    response = requests.get(url, headers=headers, timeout=30, proxies=proxies, verify=verify_ssl)
     response.raise_for_status()
     return response.text
 
