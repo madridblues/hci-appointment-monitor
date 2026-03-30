@@ -212,13 +212,13 @@ def _is_cloudflare_blocked(response) -> str | None:
 
 
 def _fetch_page(url: str, proxy_url: str) -> FetchResult:
-    """Fetch a page via proxy only. 3 retries with 45s timeout.
+    """Fetch a page via proxy only. 3 retries with 150s timeout.
     Each retry gets a new proxy IP. Detects Cloudflare blocks."""
     last_error = None
     for attempt in range(3):
         try:
             session = _make_session(proxy_url)
-            response = session.get(url, timeout=45, verify=False)
+            response = session.get(url, timeout=150, verify=False)
 
             # Check for Cloudflare block
             cf_block = _is_cloudflare_blocked(response)
