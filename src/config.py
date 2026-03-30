@@ -36,7 +36,7 @@ class Config:
     year: str = "2026"
 
     # Monitoring
-    check_interval: int = 300  # seconds (5 minutes)
+    check_interval: int = 120  # seconds (2 minutes)
 
     # Email
     email_enabled: bool = False
@@ -55,6 +55,7 @@ class Config:
 
     # Proxy
     proxy_url: str = ""
+    crawlbase_token: str = ""
 
     # Dashboard
     dashboard_enabled: bool = True
@@ -103,6 +104,7 @@ def load_config() -> Config:
         webhook_url=os.getenv("WEBHOOK_URL", ""),
         webhook_headers=os.getenv("WEBHOOK_HEADERS", ""),
         proxy_url=os.getenv("PROXY_URL", ""),
+        crawlbase_token=os.getenv("CRAWLBASE_TOKEN", ""),
         dashboard_enabled=_bool(os.getenv("DASHBOARD_ENABLED", "true")),
         dashboard_host=os.getenv("DASHBOARD_HOST", Config.dashboard_host),
         dashboard_port=int(os.getenv("PORT", os.getenv("DASHBOARD_PORT", str(Config.dashboard_port)))),

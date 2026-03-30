@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.config import LOCATION_NAMES, load_config
 from src.dashboard import start_dashboard
 from src.notifier import send_email, send_webhook
-from src.scraper import AvailableSlot, check_appointments, get_proxy_ip
+from src.scraper import AvailableSlot, check_appointments, get_direct_ip, save_snapshot
 from src.stats import tracker
 
 logging.basicConfig(
@@ -61,7 +61,8 @@ def notify(slots: list[AvailableSlot]) -> None:
 
 
 def check_location(location_id: str, months: list[str], year: str,
-                   apt_type: str, service_id: str, proxy_url: str) -> list[AvailableSlot]:
+                   apt_type: str, service_id: str, proxy_url: str,
+                   crawlbase_token: str = "") -> list[AvailableSlot]:
     """Check all months for a single location. Runs in a thread."""
     location_name = LOCATION_NAMES.get(location_id, f"Location {location_id}")
     location_slots: list[AvailableSlot] = []
@@ -76,18 +77,24 @@ def check_location(location_id: str, months: list[str], year: str,
                 location_id=location_id,
                 service_id=service_id,
                 proxy_url=proxy_url,
+                crawlbase_token=crawlbase_token,
             )
             # Only keep slots with actual time slots
             slots_with_times = [s for s in slots if s.time_slots]
             location_slots.extend(slots_with_times)
 
             dates = [s.date for s in slots_with_times]
+            # Determine fetch info from first slot (same for all in this check)
+            fetched_via = slots_with_times[0].fetched_via if slots_with_times else ""
+            fetched_ip = slots_with_times[0].fetched_ip if slots_with_times else ""
             slot_details = [
                 {
                     "date": s.date,
                     "month": s.month,
                     "year": s.year,
                     "time_slots": [{"time": ts.time, "available": ts.available} for ts in s.time_slots],
+                    "fetched_via": s.fetched_via,
+                    "fetched_ip": s.fetched_ip,
                 }
                 for s in slots_with_times
             ]
@@ -95,6 +102,7 @@ def check_location(location_id: str, months: list[str], year: str,
                 month, year, len(slots_with_times), dates,
                 location_id=location_id, location_name=location_name,
                 slot_details=slot_details,
+                fetched_via=fetched_via, fetched_ip=fetched_ip,
             )
         except Exception as e:
             logger.exception("Error checking %s for %s/%s", location_name, month, year)
@@ -117,6 +125,7 @@ def run_check() -> list[AvailableSlot]:
             executor.submit(
                 check_location, loc_id, config.monitor_months, config.year,
                 config.apt_type, config.service_id, config.proxy_url,
+                config.crawlbase_token,
             ): loc_id
             for loc_id in config.location_ids
         }
@@ -164,14 +173,13 @@ def main() -> None:
 
     tracker.reset_started()
 
-    # Detect proxy IP in background (non-blocking)
-    if config.proxy_url:
-        try:
-            ip = get_proxy_ip(config.proxy_url)
-            tracker.set_proxy_ip(ip)
-            logger.info("Proxy IP: %s", ip)
-        except Exception:
-            logger.warning("Could not detect proxy IP")
+    # Detect direct IP
+    try:
+        ip = get_direct_ip()
+        tracker.set_proxy_ip(ip)
+        logger.info("Server IP: %s | Proxy configured: %s", ip, bool(config.proxy_url))
+    except Exception:
+        logger.warning("Could not detect server IP")
 
     if args.once:
         slots = run_check()
@@ -202,8 +210,16 @@ def main() -> None:
                 for s in new_slots:
                     loc = LOCATION_NAMES.get(s.location_id, s.location_id)
                     times = ", ".join(f"{ts.time}({ts.available})" for ts in s.time_slots)
-                    logger.info("NEW: %s - %s/%s/%s: %s", loc, s.date, s.month, s.year, times)
+                    logger.info("NEW: %s - %s/%s/%s: %s (via %s, IP: %s)",
+                                loc, s.date, s.month, s.year, times,
+                                s.fetched_via, s.fetched_ip)
                     previously_found.add(f"{s.location_id}/{s.month}/{s.date}/{s.year}")
+                    # Save HTML snapshot
+                    try:
+                        save_snapshot(s)
+                    except Exception:
+                        logger.warning("Failed to save snapshot for %s %s/%s",
+                                       loc, s.date, s.month)
                 notify(new_slots)
 
             # Remove from previously_found if no longer available

@@ -22,6 +22,8 @@ class CheckRecord:
     location_id: str = ""
     location_name: str = ""
     error: str = ""
+    fetched_via: str = ""
+    fetched_ip: str = ""
 
 
 @dataclass
@@ -34,6 +36,8 @@ class FoundRecord:
     month: str
     year: str
     time_slots: list[dict] = field(default_factory=list)  # [{time, available}]
+    fetched_via: str = ""   # "proxy" or "direct"
+    fetched_ip: str = ""    # IP used
 
 
 @dataclass
@@ -102,7 +106,8 @@ class StatsTracker:
 
     def record_check(self, month: str, year: str, slots_found: int, available_dates: list[str],
                      error: str = "", location_id: str = "", location_name: str = "",
-                     slot_details: list[dict] | None = None, proxy_ip: str = ""):
+                     slot_details: list[dict] | None = None, proxy_ip: str = "",
+                     fetched_via: str = "", fetched_ip: str = ""):
         with self._lock:
             now = datetime.now().isoformat()
             self._stats.total_checks += 1
@@ -142,6 +147,8 @@ class StatsTracker:
                         month=sd["month"],
                         year=sd["year"],
                         time_slots=sd.get("time_slots", []),
+                        fetched_via=sd.get("fetched_via", fetched_via),
+                        fetched_ip=sd.get("fetched_ip", fetched_ip),
                     )
                     self._stats.found_log.append(asdict(found))
 
@@ -164,7 +171,7 @@ class StatsTracker:
                 timestamp=now, month=month, year=year,
                 slots_found=slots_found, available_dates=available_dates,
                 location_id=location_id, location_name=location_name,
-                error=error,
+                error=error, fetched_via=fetched_via, fetched_ip=fetched_ip,
             )
             self._stats.check_history.append(asdict(record))
             self._stats.check_history = self._stats.check_history[-200:]

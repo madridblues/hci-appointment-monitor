@@ -6,8 +6,11 @@ import logging
 import os
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
 
 from src.stats import tracker
+
+SNAPSHOTS_DIR = Path(__file__).resolve().parent.parent / "data" / "snapshots"
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +95,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <h2>Found Log (Slots Discovered)</h2>
     <div style="overflow-x:auto">
       <table>
-        <thead><tr><th>Found At</th><th>Location</th><th>Date</th><th>Available Time Slots</th></tr></thead>
+        <thead><tr><th>Found At</th><th>Location</th><th>Date</th><th>Available Time Slots</th><th>Via</th><th>IP</th></tr></thead>
         <tbody id="found-log"></tbody>
       </table>
     </div>
@@ -102,7 +105,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <h2>Recent Checks</h2>
     <div style="overflow-x:auto">
       <table>
-        <thead><tr><th>Time</th><th>Location</th><th>Month</th><th>Slots</th><th>Dates</th><th>Status</th></tr></thead>
+        <thead><tr><th>Time</th><th>Location</th><th>Month</th><th>Slots</th><th>Dates</th><th>Via / IP</th><th>Status</th></tr></thead>
         <tbody id="check-history"></tbody>
       </table>
     </div>
@@ -175,12 +178,15 @@ function renderLocations(locations) {
 }
 
 function renderFoundLog(log) {
-  if (!log || log.length === 0) return '<tr><td colspan="4" class="no-data">No slots found yet</td></tr>';
+  if (!log || log.length === 0) return '<tr><td colspan="6" class="no-data">No slots found yet</td></tr>';
   return log.slice().reverse().slice(0, 50).map(f => {
     const times = (f.time_slots || []).map(t => t.time + ' (' + t.available + ')').join(', ');
+    const via = f.fetched_via || '-';
+    const ip = f.fetched_ip || '-';
     return '<tr class="found-row"><td>' + fmt(f.timestamp) + '</td><td>' + (f.location_name||f.location_id) +
       '</td><td>' + f.date + '/' + f.month + '/' + f.year +
-      '</td><td class="found-times">' + (times || '-') + '</td></tr>';
+      '</td><td class="found-times">' + (times || '-') +
+      '</td><td>' + via + '</td><td style="font-size:0.65rem;color:#94a3b8">' + ip + '</td></tr>';
   }).join('');
 }
 
@@ -209,12 +215,15 @@ function loadStats() {
 
       // Check history
       const checks = (s.check_history || []).slice().reverse().slice(0, 40);
-      document.getElementById('check-history').innerHTML = checks.map(c =>
-        '<tr><td>' + fmt(c.timestamp) + '</td><td>' + (c.location_name||c.location_id||'-') +
+      document.getElementById('check-history').innerHTML = checks.map(c => {
+        const via = c.fetched_via || '-';
+        const ip = c.fetched_ip ? ' ' + c.fetched_ip : '';
+        return '<tr><td>' + fmt(c.timestamp) + '</td><td>' + (c.location_name||c.location_id||'-') +
         '</td><td>' + c.month + '/' + c.year + '</td><td>' + c.slots_found +
         '</td><td>' + ((c.available_dates||[]).join(', ')||'-') +
-        '</td><td class="' + (c.error ? 'err' : 'ok') + '">' + (c.error ? c.error.substring(0,60)+'...' : 'OK') + '</td></tr>'
-      ).join('');
+        '</td><td style="font-size:0.65rem">' + via + '<br><span style="color:#64748b">' + ip + '</span></td>' +
+        '<td class="' + (c.error ? 'err' : 'ok') + '">' + (c.error ? c.error.substring(0,60)+'...' : 'OK') + '</td></tr>';
+      }).join('');
 
       // Notifications
       const notifs = (s.notification_log || []).slice().reverse().slice(0, 20);
@@ -290,6 +299,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/html")
             self.end_headers()
             self.wfile.write(DASHBOARD_HTML.encode())
+        elif self.path.startswith("/snapshot/"):
+            snap_name = self.path.split("/snapshot/")[1]
+            snap_file = SNAPSHOTS_DIR / f"{snap_name}.html"
+            if snap_file.exists():
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(snap_file.read_bytes())
+            else:
+                self.send_response(404)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(b"Snapshot not found")
         else:
             self.send_response(404)
             self.end_headers()

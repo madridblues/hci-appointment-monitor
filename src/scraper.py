@@ -4,6 +4,8 @@ import logging
 import re
 import warnings
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlencode, parse_qs, urlparse
 
 import requests
@@ -16,24 +18,53 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://appointment.hcilondon.gov.in/appointment.php"
 
-_proxy_ip: str = ""
+_direct_ip: str = ""
 
 
-def get_proxy_ip(proxy_url: str = "") -> str:
-    """Detect the outgoing IP address (through proxy if configured)."""
-    global _proxy_ip
-    if _proxy_ip:
-        return _proxy_ip
+def get_random_user_agent(token: str = "") -> str:
+    """Get a random user agent from Crawlbase API, with fallback."""
+    default = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
+    )
+    if not token:
+        return default
     try:
-        proxies = None
-        if proxy_url:
-            proxies = {"http": proxy_url, "https": proxy_url}
-        resp = requests.get("https://api.ipify.org?format=json", timeout=15,
-                            proxies=proxies, verify=not bool(proxy_url))
-        _proxy_ip = resp.json().get("ip", "unknown")
+        resp = requests.get(
+            f"https://api.crawlbase.com/user_agents?token={token}",
+            timeout=5,
+        )
+        data = resp.json()
+        if data.get("success") and data.get("agents"):
+            return data["agents"][0]
     except Exception:
-        _proxy_ip = "unknown"
-    return _proxy_ip
+        pass
+    return default
+
+
+def get_direct_ip() -> str:
+    """Detect the direct outgoing IP address."""
+    global _direct_ip
+    if _direct_ip:
+        return _direct_ip
+    try:
+        resp = requests.get("https://api.ipify.org?format=json", timeout=10)
+        _direct_ip = resp.json().get("ip", "unknown")
+    except Exception:
+        _direct_ip = "unknown"
+    return _direct_ip
+
+
+def get_proxy_ip(proxy_url: str) -> str:
+    """Detect outgoing IP through the proxy."""
+    try:
+        proxies = {"http": proxy_url, "https": proxy_url}
+        resp = requests.get("https://api.ipify.org?format=json", timeout=15,
+                            proxies=proxies, verify=False)
+        return resp.json().get("ip", "unknown")
+    except Exception:
+        return "unknown"
 
 
 @dataclass
@@ -52,6 +83,9 @@ class AvailableSlot:
     service_id: str
     url: str
     time_slots: list[TimeSlot] = field(default_factory=list)
+    fetched_via: str = ""   # "proxy" or "direct"
+    fetched_ip: str = ""    # IP address used
+    page_snapshot: str = "" # raw HTML snapshot of the date page
 
 
 def build_url(month: str, year: str, apt_type: str, location_id: str, service_id: str, date: str = "") -> str:
@@ -67,16 +101,20 @@ def build_url(month: str, year: str, apt_type: str, location_id: str, service_id
     return f"{BASE_URL}?{urlencode(params)}"
 
 
-def _fetch_page(url: str, proxy_url: str = "") -> str:
-    """Fetch a page using a fresh browser-like session each time."""
-    # Fresh session per request — clean cookies, no connection reuse
+class FetchResult:
+    """Result of a page fetch with metadata."""
+    def __init__(self, html: str, via: str, ip: str = ""):
+        self.html = html
+        self.via = via    # "proxy" or "direct"
+        self.ip = ip      # IP used for the request
+
+
+def _make_session(proxy_url: str = "", crawlbase_token: str = "") -> requests.Session:
+    """Create a fresh browser-like session."""
     session = requests.Session()
+    ua = get_random_user_agent(crawlbase_token)
     session.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/131.0.0.0 Safari/537.36"
-        ),
+        "User-Agent": ua,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
         "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
         "Accept-Encoding": "gzip, deflate, br",
@@ -91,24 +129,43 @@ def _fetch_page(url: str, proxy_url: str = "") -> str:
         "Sec-Fetch-User": "?1",
         "Upgrade-Insecure-Requests": "1",
     })
-
-    verify_ssl = True
     if proxy_url:
         session.proxies = {"http": proxy_url, "https": proxy_url}
-        verify_ssl = False
+    return session
 
+
+def _fetch_page(url: str, proxy_url: str = "", crawlbase_token: str = "") -> FetchResult:
+    """Fetch a page. Tries proxy first (with timeout), falls back to direct."""
+    # Try proxy first if configured
+    if proxy_url:
+        try:
+            session = _make_session(proxy_url, crawlbase_token)
+            response = session.get(url, timeout=60, verify=False)
+            response.raise_for_status()
+            ip = get_proxy_ip(proxy_url)
+            session.close()
+            logger.info("Fetched via proxy (IP: %s)", ip)
+            return FetchResult(html=response.text, via="proxy", ip=ip)
+        except Exception as e:
+            logger.warning("Proxy failed (%s), falling back to direct", e)
+
+    # Direct connection (with retries)
     for attempt in range(3):
         try:
-            response = session.get(url, timeout=120, verify=verify_ssl)
+            session = _make_session(crawlbase_token=crawlbase_token)
+            response = session.get(url, timeout=120, verify=True)
             response.raise_for_status()
-            break
+            ip = get_direct_ip()
+            session.close()
+            logger.info("Fetched direct (IP: %s)", ip)
+            return FetchResult(html=response.text, via="direct", ip=ip)
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
             if attempt == 2:
                 raise
-            logger.warning("Attempt %d failed, retrying...", attempt + 1)
+            logger.warning("Direct attempt %d failed, retrying...", attempt + 1)
             continue
-    session.close()
-    return response.text
+    # Should not reach here, but just in case
+    raise requests.exceptions.ConnectionError("All fetch attempts failed")
 
 
 def _parse_time_slots(html: str) -> list[TimeSlot]:
@@ -158,38 +215,38 @@ def check_appointments(
     location_id: str = "8",
     service_id: str = "29",
     proxy_url: str = "",
+    crawlbase_token: str = "",
 ) -> list[AvailableSlot]:
     """
     Fetch the appointment page, find bookable dates, then fetch each date's
     page to get available time slots. Only returns dates that have at least
-    one bookable time slot.
+    one bookable time slot. Tries proxy first, falls back to direct.
     """
     url = build_url(month, year, apt_type, location_id, service_id)
     logger.info("Checking appointments at: %s", url)
 
-    if proxy_url:
-        logger.info("Routing via proxy (IP: %s)", get_proxy_ip(proxy_url))
-
-    html = _fetch_page(url, proxy_url)
-    bookable_dates = _parse_bookable_dates(html, month)
+    result = _fetch_page(url, proxy_url, crawlbase_token)
+    bookable_dates = _parse_bookable_dates(result.html, month)
 
     if not bookable_dates:
-        logger.info("No bookable dates for %s/%s", month, year)
+        logger.info("No bookable dates for %s/%s (via %s, IP: %s)",
+                     month, year, result.via, result.ip)
         return []
 
-    logger.info("Found %d bookable date(s) for %s/%s, checking time slots...",
-                len(bookable_dates), month, year)
+    logger.info("Found %d bookable date(s) for %s/%s (via %s, IP: %s), checking time slots...",
+                len(bookable_dates), month, year, result.via, result.ip)
 
     available: list[AvailableSlot] = []
     for date_str in bookable_dates:
         date_url = build_url(month, year, apt_type, location_id, service_id, date=date_str)
         try:
-            date_html = _fetch_page(date_url, proxy_url)
-            time_slots = _parse_time_slots(date_html)
+            date_result = _fetch_page(date_url, proxy_url, crawlbase_token)
+            time_slots = _parse_time_slots(date_result.html)
 
             if time_slots:
                 slot_summary = ", ".join(f"{ts.time} ({ts.available})" for ts in time_slots)
-                logger.info("  Date %s: %s", date_str, slot_summary)
+                logger.info("  Date %s: %s (via %s, IP: %s)",
+                            date_str, slot_summary, date_result.via, date_result.ip)
                 available.append(
                     AvailableSlot(
                         date=date_str,
@@ -200,6 +257,9 @@ def check_appointments(
                         service_id=service_id,
                         url=date_url,
                         time_slots=time_slots,
+                        fetched_via=date_result.via,
+                        fetched_ip=date_result.ip,
+                        page_snapshot=date_result.html,
                     )
                 )
             else:
@@ -276,3 +336,18 @@ def _parse_bookable_dates(html: str, month: str) -> list[str]:
             dates.append(date_text)
 
     return dates
+
+
+SNAPSHOTS_DIR = Path(__file__).resolve().parent.parent / "data" / "snapshots"
+
+
+def save_snapshot(slot: 'AvailableSlot') -> str:
+    """Save the HTML snapshot of a found slot. Returns the snapshot filename."""
+    SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    name = f"loc{slot.location_id}_{slot.date}_{slot.month}_{slot.year}_{ts}"
+    filepath = SNAPSHOTS_DIR / f"{name}.html"
+    if slot.page_snapshot:
+        filepath.write_text(slot.page_snapshot, encoding="utf-8")
+        logger.info("Saved snapshot: %s", name)
+    return name
