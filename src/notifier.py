@@ -26,20 +26,26 @@ def _build_message(slots: list[AvailableSlot]) -> tuple[str, str]:
     ]
 
     for period, period_slots in grouped.items():
-        dates = ", ".join(s.date for s in period_slots)
-        url = period_slots[0].url
         apt_type = period_slots[0].apt_type
 
         lines.append(f"Month: {period} | Type: {apt_type}")
-        lines.append(f"Available dates: {dates}")
-        lines.append(f"Book now: {url}")
-        lines.append("")
-
         html_parts.append(
-            f"<p><strong>Month:</strong> {period} | <strong>Type:</strong> {apt_type}<br>"
-            f"<strong>Available dates:</strong> {dates}<br>"
-            f'<a href="{url}">Book Now &rarr;</a></p>'
+            f"<p><strong>Month:</strong> {period} | <strong>Type:</strong> {apt_type}</p>"
         )
+
+        for slot in period_slots:
+            lines.append(f"  Date {slot.date}:")
+            html_parts.append(f"<p><strong>Date {slot.date}:</strong><br>")
+            if slot.time_slots:
+                for ts in slot.time_slots:
+                    lines.append(f"    {ts.time} ({ts.available} slot(s))")
+                    html_parts.append(f"&nbsp;&nbsp;{ts.time} — {ts.available} slot(s)<br>")
+            else:
+                lines.append("    (time slots not checked)")
+                html_parts.append("&nbsp;&nbsp;(time slots not checked)<br>")
+            lines.append(f"  Book: {slot.url}")
+            html_parts.append(f'<a href="{slot.url}">Book Now &rarr;</a></p>')
+        lines.append("")
 
     plain = "\n".join(lines)
     html = "\n".join(html_parts)
@@ -97,6 +103,10 @@ def send_webhook(
                 "location_id": s.location_id,
                 "service_id": s.service_id,
                 "url": s.url,
+                "time_slots": [
+                    {"time": ts.time, "available": ts.available}
+                    for ts in s.time_slots
+                ],
             }
             for s in slots
         ],
