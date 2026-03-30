@@ -1,8 +1,9 @@
 """Scrapes the HCI London appointment page for available dates."""
 
 import logging
+import re
 from dataclasses import dataclass
-from urllib.parse import urlencode
+from urllib.parse import urlencode, parse_qs, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -45,10 +46,14 @@ def check_appointments(
     """
     Fetch the appointment page and parse for available dates.
 
-    The HCI London appointment calendar uses a table layout where:
-    - Available dates are clickable links (<a> tags) inside table cells
-    - Unavailable/past dates are plain text or greyed-out cells
-    - The calendar is rendered as an HTML <table> with class "cal_table" or similar
+    The HCI London calendar uses <div id="calendar"> with <ul class="dates">
+    containing <a> wrapping <li> elements:
+    - Available (green): <a style="color:#28B913; font-weight:bold;" href="appointment.php?date=X&...">
+                           <li class="a_full">X</li></a>
+    - Unavailable (red): <a href="#d" style="color:red;">
+                           <li>X</li></a>
+    - Grey/disabled:     <li class="a_disable">
+    - Fully booked:      <li> with text-decoration: line-through
     """
     url = build_url(month, year, apt_type, location_id, service_id)
     logger.info("Checking appointments at: %s", url)
@@ -86,81 +91,84 @@ def _parse_available_slots(
     """
     Parse available appointment slots from the HTML.
 
-    Detection strategies (tried in order):
-    1. Look for clickable date links in calendar table cells (<td> with <a>)
-    2. Look for cells with availability-indicating CSS classes (e.g., "available", "green", "open")
-    3. Look for cells with onclick handlers that suggest booking capability
+    Available dates are identified by:
+    1. <a> tags with style containing color:#28B913 (green) and a real href (not "#d")
+    2. The <a> href contains "date=X" with a valid day number
+    3. The inner <li> has class "a_full" (not "a_disable") and contains a digit
     """
     soup = BeautifulSoup(html, "html.parser")
     available: list[AvailableSlot] = []
+    seen_dates: set[str] = set()
 
-    # Strategy 1: Find calendar tables and look for clickable date links
-    for table in soup.find_all("table"):
-        for td in table.find_all("td"):
-            link = td.find("a")
-            if not link:
+    # Find the calendar div
+    calendar = soup.find("div", id="calendar")
+    if not calendar:
+        calendar = soup  # fallback to searching whole page
+
+    # Find all <a> tags in the calendar dates list
+    for link in calendar.find_all("a"):
+        href = link.get("href", "")
+        style = link.get("style", "")
+
+        # Skip non-booking links (red/unavailable dates link to "#d")
+        if href == "#d" or not href or "date=" not in href:
+            continue
+
+        # Check for green color in style (available appointments)
+        is_green = "#28B913" in style.upper() or "#28b913" in style.lower()
+        if not is_green:
+            # Also check for other green-ish colors
+            green_pattern = re.search(r'color\s*:\s*#(?:28B913|009900|00[89A-F][0-9A-F]00|green)', style, re.IGNORECASE)
+            if not green_pattern and "green" not in style.lower():
                 continue
 
+        # Get the date text from inner <li> or direct text
+        li = link.find("li")
+        if li:
+            date_text = li.get_text(strip=True)
+            li_classes = " ".join(li.get("class", []))
+            # Skip disabled dates (grey - not yet opened)
+            if "a_disable" in li_classes:
+                continue
+            # Skip fully booked (strikethrough)
+            li_style = li.get("style", "")
+            if "line-through" in li_style:
+                continue
+        else:
             date_text = link.get_text(strip=True)
-            if not date_text.isdigit():
-                continue
 
-            href = link.get("href", "")
-            # Skip navigation links (prev/next month), only match date booking links
-            if "month=" in href and "day=" not in href and "date=" not in href:
-                continue
+        # Validate it's a real date number
+        if not date_text or not date_text.isdigit():
+            continue
 
-            available.append(
-                AvailableSlot(
-                    date=date_text,
-                    month=month,
-                    year=year,
-                    apt_type=apt_type,
-                    location_id=location_id,
-                    service_id=service_id,
-                    url=url,
-                )
+        # Extract date from href as fallback validation
+        parsed = urlparse(href)
+        qs = parse_qs(parsed.query) if parsed.query else {}
+        href_date = qs.get("date", [None])[0]
+        if href_date and href_date == "0":
+            continue  # padding cells have date=0
+
+        # Avoid duplicates
+        if date_text in seen_dates:
+            continue
+        seen_dates.add(date_text)
+
+        available.append(
+            AvailableSlot(
+                date=date_text,
+                month=month,
+                year=year,
+                apt_type=apt_type,
+                location_id=location_id,
+                service_id=service_id,
+                url=url,
             )
-
-    # Strategy 2: Look for cells with availability CSS classes
-    if not available:
-        availability_classes = ["available", "green", "open", "active", "bookable"]
-        for td in soup.find_all("td"):
-            td_classes = " ".join(td.get("class", []))
-            if any(cls in td_classes.lower() for cls in availability_classes):
-                date_text = td.get_text(strip=True)
-                if date_text.isdigit():
-                    available.append(
-                        AvailableSlot(
-                            date=date_text,
-                            month=month,
-                            year=year,
-                            apt_type=apt_type,
-                            location_id=location_id,
-                            service_id=service_id,
-                            url=url,
-                        )
-                    )
-
-    # Strategy 3: Look for cells with onclick handlers
-    if not available:
-        for td in soup.find_all("td", onclick=True):
-            date_text = td.get_text(strip=True)
-            if date_text.isdigit():
-                available.append(
-                    AvailableSlot(
-                        date=date_text,
-                        month=month,
-                        year=year,
-                        apt_type=apt_type,
-                        location_id=location_id,
-                        service_id=service_id,
-                        url=url,
-                    )
-                )
+        )
 
     if available:
-        logger.info("Found %d available slot(s) for %s/%s", len(available), month, year)
+        logger.info("Found %d available slot(s) for %s/%s: dates %s",
+                     len(available), month, year,
+                     ", ".join(s.date for s in available))
     else:
         logger.info("No available slots for %s/%s", month, year)
 
