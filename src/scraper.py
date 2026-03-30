@@ -112,59 +112,60 @@ class FetchResult:
 def _make_session(proxy_url: str = "", crawlbase_token: str = "") -> requests.Session:
     """Create a fresh browser-like session."""
     session = requests.Session()
-    ua = get_random_user_agent(crawlbase_token)
-    session.headers.update({
-        "User-Agent": ua,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-        "Sec-Ch-Ua": '"Chromium";v="131", "Not_A Brand";v="24"',
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": '"Windows"',
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Upgrade-Insecure-Requests": "1",
-    })
+
     if proxy_url:
+        # Blank User-Agent → Crawlbase auto-rotates it
+        session.headers.update({
+            "User-Agent": "",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-GB,en;q=0.5",
+        })
         session.proxies = {"http": proxy_url, "https": proxy_url}
+    else:
+        ua = get_random_user_agent(crawlbase_token)
+        session.headers.update({
+            "User-Agent": ua,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Sec-Ch-Ua": '"Chromium";v="131", "Not_A Brand";v="24"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"',
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Upgrade-Insecure-Requests": "1",
+        })
     return session
 
 
 def _fetch_page(url: str, proxy_url: str = "", crawlbase_token: str = "") -> FetchResult:
-    """Fetch a page. Tries proxy first (with timeout), falls back to direct."""
-    # Try proxy first if configured
-    if proxy_url:
-        try:
-            session = _make_session(proxy_url, crawlbase_token)
-            response = session.get(url, timeout=60, verify=False)
-            response.raise_for_status()
-            ip = get_proxy_ip(proxy_url)
-            session.close()
-            logger.info("Fetched via proxy (IP: %s)", ip)
-            return FetchResult(html=response.text, via="proxy", ip=ip)
-        except Exception as e:
-            logger.warning("Proxy failed (%s), falling back to direct", e)
+    """Fetch a page via proxy (required) with retries. 180s timeout for slow sites."""
 
-    # Direct connection (with retries)
     for attempt in range(3):
         try:
-            session = _make_session(crawlbase_token=crawlbase_token)
-            response = session.get(url, timeout=120, verify=True)
+            session = _make_session(proxy_url, crawlbase_token)
+            verify_ssl = not bool(proxy_url)
+            response = session.get(url, timeout=180, verify=verify_ssl)
             response.raise_for_status()
-            ip = get_direct_ip()
+            ip = "rotating"
+            if proxy_url:
+                # Don't detect IP each time (slow) - just note it's proxied
+                ip = "proxy-rotated"
+            else:
+                ip = get_direct_ip()
             session.close()
-            logger.info("Fetched direct (IP: %s)", ip)
-            return FetchResult(html=response.text, via="direct", ip=ip)
-        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            via = "proxy" if proxy_url else "direct"
+            logger.info("Fetched via %s (attempt %d)", via, attempt + 1)
+            return FetchResult(html=response.text, via=via, ip=ip)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
             if attempt == 2:
                 raise
-            logger.warning("Direct attempt %d failed, retrying...", attempt + 1)
+            logger.warning("Attempt %d failed (%s), retrying...", attempt + 1, e)
             continue
-    # Should not reach here, but just in case
     raise requests.exceptions.ConnectionError("All fetch attempts failed")
 
 
