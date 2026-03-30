@@ -29,6 +29,7 @@ class LocationAvailability:
     """Tracks availability state for a single location."""
     location_id: str
     location_name: str
+    proxy_ip: str = ""
     # Current available slots: list of {date, month, year, time_slots: [{time, available}]}
     available_slots: list[dict] = field(default_factory=list)
     # Next available date info
@@ -92,7 +93,7 @@ class StatsTracker:
 
     def record_check(self, month: str, year: str, slots_found: int, available_dates: list[str],
                      error: str = "", location_id: str = "", location_name: str = "",
-                     slot_details: list[dict] | None = None):
+                     slot_details: list[dict] | None = None, proxy_ip: str = ""):
         """
         Record a check result.
 
@@ -110,6 +111,9 @@ class StatsTracker:
             loc = self._get_location(location_id, location_name)
             loc["last_check_at"] = now
             loc["total_checks"] = loc.get("total_checks", 0) + 1
+
+            if proxy_ip:
+                loc["proxy_ip"] = proxy_ip
 
             if error:
                 loc["last_check_error"] = error
@@ -192,6 +196,14 @@ class StatsTracker:
     def reset_started(self):
         with self._lock:
             self._stats.started_at = datetime.now().isoformat()
+            # Clear stale availability data on restart
+            self._stats.locations = {}
+            self._stats.total_checks = 0
+            self._stats.total_slots_found = 0
+            self._stats.total_errors = 0
+            self._stats.total_notifications_sent = 0
+            self._stats.check_history = []
+            self._stats.notification_log = []
             self._save()
 
 

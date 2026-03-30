@@ -151,6 +151,7 @@ function renderLocationCards(locations) {
 
     // Meta info
     html += '<div class="loc-meta">';
+    html += '<span><strong>Proxy IP:</strong> ' + (loc.proxy_ip || 'direct') + '</span>';
     html += '<span><strong>Last check:</strong> ' + fmtShort(loc.last_check_at) + '</span>';
     html += '<span><strong>Next available:</strong> ' + (loc.next_available_date || 'none') + '</span>';
     if (loc.last_found_at) {

@@ -28,7 +28,7 @@ import time
 from src.config import LOCATION_NAMES, load_config
 from src.dashboard import start_dashboard
 from src.notifier import send_email, send_webhook
-from src.scraper import AvailableSlot, check_appointments, get_proxy_ip
+from src.scraper import AvailableSlot, check_appointments, get_proxy_ip, get_proxy_ip_for_location
 from src.stats import tracker
 
 logging.basicConfig(
@@ -80,6 +80,10 @@ def run_check() -> list[AvailableSlot]:
     all_slots: list[AvailableSlot] = []
     for location_id in config.location_ids:
         location_name = LOCATION_NAMES.get(location_id, f"Location {location_id}")
+        # Get proxy IP for this location's session
+        loc_proxy_ip = ""
+        if config.proxy_url:
+            loc_proxy_ip = get_proxy_ip_for_location(config.proxy_url, location_id)
         for month in config.monitor_months:
             try:
                 logger.info("Checking %s for %s/%s...", location_name, month, config.year)
@@ -92,7 +96,9 @@ def run_check() -> list[AvailableSlot]:
                     proxy_url=config.proxy_url,
                 )
                 all_slots.extend(slots)
-                dates = [s.date for s in slots]
+                # Only include slots that actually have time slots available
+                slots_with_times = [s for s in slots if s.time_slots]
+                dates = [s.date for s in slots_with_times]
                 slot_details = [
                     {
                         "date": s.date,
@@ -100,18 +106,19 @@ def run_check() -> list[AvailableSlot]:
                         "year": s.year,
                         "time_slots": [{"time": ts.time, "available": ts.available} for ts in s.time_slots],
                     }
-                    for s in slots
+                    for s in slots_with_times
                 ]
                 tracker.record_check(
-                    month, config.year, len(slots), dates,
+                    month, config.year, len(slots_with_times), dates,
                     location_id=location_id, location_name=location_name,
-                    slot_details=slot_details,
+                    slot_details=slot_details, proxy_ip=loc_proxy_ip,
                 )
             except Exception as e:
                 logger.exception("Error checking %s for %s/%s", location_name, month, config.year)
                 tracker.record_check(
                     month, config.year, 0, [], error=str(e),
                     location_id=location_id, location_name=location_name,
+                    proxy_ip=loc_proxy_ip,
                 )
 
     return all_slots
