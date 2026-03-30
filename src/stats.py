@@ -1,15 +1,22 @@
-"""Track monitoring statistics with JSON file persistence."""
+"""Track monitoring statistics with JSON file persistence and Render env var backup."""
 
 import json
 import logging
+import os
 import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+import requests as _requests
+
 logger = logging.getLogger(__name__)
 
 STATS_FILE = Path(__file__).resolve().parent.parent / "data" / "stats.json"
+
+# Render API for persisting found_log across deploys
+RENDER_API_KEY = os.getenv("RENDER_API_KEY", "")
+RENDER_SERVICE_ID = os.getenv("RENDER_SERVICE_ID", "")
 
 
 @dataclass
@@ -115,6 +122,27 @@ class StatsTracker:
                 if k not in self._TRANSIENT_FIELDS}
         STATS_FILE.write_text(json.dumps(data, indent=2))
 
+    def _backup_found_log_to_render(self):
+        """Push found_log to FOUND_LOG_BACKUP env var via Render API (non-blocking)."""
+        if not RENDER_API_KEY or not RENDER_SERVICE_ID:
+            return
+        def _do_backup():
+            try:
+                found_json = json.dumps(self._stats.found_log)
+                # Use PATCH to update just FOUND_LOG_BACKUP without wiping other vars
+                url = f"https://api.render.com/v1/services/{RENDER_SERVICE_ID}/env-vars/FOUND_LOG_BACKUP"
+                _requests.put(
+                    url,
+                    headers={"Authorization": f"Bearer {RENDER_API_KEY}",
+                             "Content-Type": "application/json"},
+                    json={"value": found_json},
+                    timeout=10,
+                )
+                logger.info("Backed up found_log (%d entries) to Render env var", len(self._stats.found_log))
+            except Exception as e:
+                logger.debug("Found log backup failed (non-critical): %s", e)
+        threading.Thread(target=_do_backup, daemon=True).start()
+
     def _get_location(self, location_id: str, location_name: str) -> dict:
         """Get or create location state."""
         if location_id not in self._stats.locations:
@@ -175,6 +203,8 @@ class StatsTracker:
                     self._stats.found_log.append(asdict(found))
 
                 self._stats.found_log = self._stats.found_log[-100:]
+                # Auto-backup found_log to Render env var (persists across deploys)
+                self._backup_found_log_to_render()
 
             existing.sort(key=lambda s: (s.get("year", ""), s.get("month", ""), s.get("date", "").zfill(2)))
             loc["available_slots"] = existing

@@ -13,7 +13,6 @@ import os
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from src.config import LOCATION_NAMES, load_config
 from src.dashboard import start_dashboard
@@ -76,67 +75,6 @@ def notify(slots: list[AvailableSlot]) -> None:
             logger.error("Telegram notification failed, continuing...")
 
 
-def check_location(location_id: str, months: list[str], year: str,
-                   apt_type: str, service_id: str, proxy_url: str,
-                   progress_cb=None, done_cb=None) -> list[AvailableSlot]:
-    """Check all months for a single location. Runs in a thread."""
-    location_name = LOCATION_NAMES.get(location_id, f"Location {location_id}")
-    location_slots: list[AvailableSlot] = []
-
-    for month in months:
-        try:
-            if progress_cb:
-                progress_cb(location_name, month)
-            logger.info("Checking %s for %s/%s...", location_name, month, year)
-            result = check_appointments(
-                month=month,
-                year=year,
-                apt_type=apt_type,
-                location_id=location_id,
-                service_id=service_id,
-                proxy_url=proxy_url,
-            )
-            slots_with_times = [s for s in result.slots if s.time_slots]
-            location_slots.extend(slots_with_times)
-
-            dates = [s.date for s in slots_with_times]
-            slot_details = [
-                {
-                    "date": s.date,
-                    "month": s.month,
-                    "year": s.year,
-                    "time_slots": [{"time": ts.time, "available": ts.available} for ts in s.time_slots],
-                    "fetched_via": s.fetched_via,
-                    "fetched_ip": s.fetched_ip,
-                }
-                for s in slots_with_times
-            ]
-            req_url = build_url(month, year, apt_type, location_id, service_id)
-            tracker.record_check(
-                month, year, len(slots_with_times), dates,
-                location_id=location_id, location_name=location_name,
-                slot_details=slot_details,
-                fetched_via=result.fetched_via, fetched_ip=result.fetched_ip,
-                request_url=req_url,
-                response_snippet=result.response_snippet,
-                green_dates_found=result.green_dates_found,
-                dates_checked=result.dates_checked,
-            )
-            if done_cb:
-                done_cb(location_name)
-        except Exception as e:
-            logger.exception("Error checking %s for %s/%s", location_name, month, year)
-            req_url = build_url(month, year, apt_type, location_id, service_id)
-            tracker.record_check(
-                month, year, 0, [], error=str(e),
-                location_id=location_id, location_name=location_name,
-                request_url=req_url,
-            )
-            if done_cb:
-                done_cb(location_name)
-
-    return location_slots
-
 
 def get_check_interval(config) -> int:
     """Return check interval based on time of day (peak vs off-peak)."""
@@ -147,7 +85,7 @@ def get_check_interval(config) -> int:
 
 
 def run_check() -> list[AvailableSlot]:
-    """Run checks across all locations concurrently."""
+    """Run checks across all locations sequentially with 3s gap between each."""
     config = load_config()
 
     if not config.proxy_url:
@@ -159,56 +97,71 @@ def run_check() -> list[AvailableSlot]:
     n_months = len(config.monitor_months)
     total_tasks = n_locs * n_months
     done_count = 0
-    active_set: set[str] = set()
-    count_lock = threading.Lock()
 
-    def on_start(location_name, month):
-        """Called when a location+month starts fetching."""
-        with count_lock:
-            active_set.add(location_name)
-            active_names = ", ".join(sorted(active_set))
+    tracker.set_monitor_state("checking", detail="Starting checks...", progress=f"0/{total_tasks} done")
+
+    for loc_id in config.location_ids:
+        location_name = LOCATION_NAMES.get(loc_id, f"Location {loc_id}")
+        for month in config.monitor_months:
             tracker.set_monitor_state(
                 "checking",
-                detail=f"{n_locs} locations concurrent: {active_names}",
+                detail=f"{location_name} — {month}/{config.year}",
                 progress=f"{done_count}/{total_tasks} done",
             )
 
-    def on_done(location_name):
-        """Called when a location+month finishes."""
-        nonlocal done_count
-        with count_lock:
-            done_count += 1
-            active_set.discard(location_name)
-            if active_set:
-                active_names = ", ".join(sorted(active_set))
-                detail = f"{len(active_set)} active: {active_names}"
-            else:
-                detail = "Finishing up..."
-            tracker.set_monitor_state(
-                "checking",
-                detail=detail,
-                progress=f"{done_count}/{total_tasks} done",
-            )
-
-    tracker.set_monitor_state("checking", detail=f"Starting {n_locs} locations...", progress=f"0/{total_tasks} done")
-
-    with ThreadPoolExecutor(max_workers=n_locs) as executor:
-        futures = {
-            executor.submit(
-                check_location, loc_id, config.monitor_months, config.year,
-                config.apt_type, config.service_id, config.proxy_url,
-                progress_cb=on_start, done_cb=on_done,
-            ): loc_id
-            for loc_id in config.location_ids
-        }
-
-        for future in as_completed(futures):
-            loc_id = futures[future]
             try:
-                slots = future.result()
-                all_slots.extend(slots)
-            except Exception:
-                logger.exception("Thread failed for location %s", loc_id)
+                logger.info("Checking %s for %s/%s...", location_name, month, config.year)
+                result = check_appointments(
+                    month=month,
+                    year=config.year,
+                    apt_type=config.apt_type,
+                    location_id=loc_id,
+                    service_id=config.service_id,
+                    proxy_url=config.proxy_url,
+                )
+                slots_with_times = [s for s in result.slots if s.time_slots]
+                all_slots.extend(slots_with_times)
+
+                dates = [s.date for s in slots_with_times]
+                slot_details = [
+                    {
+                        "date": s.date, "month": s.month, "year": s.year,
+                        "time_slots": [{"time": ts.time, "available": ts.available} for ts in s.time_slots],
+                        "fetched_via": s.fetched_via, "fetched_ip": s.fetched_ip,
+                    }
+                    for s in slots_with_times
+                ]
+                req_url = build_url(month, config.year, config.apt_type, loc_id, config.service_id)
+                tracker.record_check(
+                    month, config.year, len(slots_with_times), dates,
+                    location_id=loc_id, location_name=location_name,
+                    slot_details=slot_details,
+                    fetched_via=result.fetched_via, fetched_ip=result.fetched_ip,
+                    request_url=req_url,
+                    response_snippet=result.response_snippet,
+                    green_dates_found=result.green_dates_found,
+                    dates_checked=result.dates_checked,
+                )
+            except Exception as e:
+                logger.exception("Error checking %s for %s/%s", location_name, month, config.year)
+                req_url = build_url(month, config.year, config.apt_type, loc_id, config.service_id)
+                tracker.record_check(
+                    month, config.year, 0, [], error=str(e),
+                    location_id=loc_id, location_name=location_name,
+                    fetched_via="proxy", fetched_ip=config.proxy_url.split("@")[-1].split(":")[0] if "@" in config.proxy_url else "proxy",
+                    request_url=req_url,
+                )
+
+            done_count += 1
+            tracker.set_monitor_state(
+                "checking",
+                detail=f"{location_name} — {month}/{config.year} done",
+                progress=f"{done_count}/{total_tasks} done",
+            )
+
+            # 3 second gap between each check
+            if done_count < total_tasks:
+                time.sleep(3)
 
     return all_slots
 
