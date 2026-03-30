@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://appointment.hcilondon.gov.in/appointment.php"
 
 BATCH_SIZE = 5  # Number of green dates to check concurrently per batch
-HEALTH_CHECK_TIMEOUT = 60  # Health check timeout (proxy can be slow)
+HEALTH_CHECK_TIMEOUT = 90  # Health check timeout (proxy can be slow)
 
 
 @dataclass
