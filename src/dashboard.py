@@ -87,6 +87,22 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .alarm-text { font-size: 1.1rem; font-weight: 700; color: #fbbf24; }
   .alarm-dismiss { background: #475569; border: none; color: #e2e8f0; padding: 6px 16px; border-radius: 8px; cursor: pointer; font-size: 0.8rem; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.7; } }
+  /* Live status bar */
+  .live-bar { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: #1e293b; border: 1px solid #334155; border-radius: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+  .live-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .live-dot.connected { background: #4ade80; box-shadow: 0 0 6px #4ade80; animation: blink 2s infinite; }
+  .live-dot.disconnected { background: #f87171; }
+  .live-dot.checking { background: #fbbf24; animation: blink 0.5s infinite; }
+  @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .live-state { font-size: 0.8rem; font-weight: 600; }
+  .live-detail { font-size: 0.7rem; color: #94a3b8; }
+  .live-progress { font-size: 0.7rem; color: #60a5fa; font-weight: 500; }
+  .live-countdown { font-size: 0.75rem; color: #fbbf24; font-family: monospace; }
+  .force-btn { background: #1d4ed8; border: 1px solid #3b82f6; color: #fff; padding: 6px 16px; border-radius: 8px; cursor: pointer; font-size: 0.75rem; font-weight: 600; margin-left: auto; transition: all 0.2s; }
+  .force-btn:hover { background: #2563eb; transform: scale(1.02); }
+  .force-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+  .force-btn.triggered { background: #166534; border-color: #4ade80; }
+  .conn-status { font-size: 0.65rem; color: #64748b; }
 </style>
 </head>
 <body>
@@ -100,15 +116,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 </div>
 <div class="container">
-  <div class="refresh-bar">
-    <span style="color:#64748b;font-size:0.7rem;">Auto-refreshes every 10s</span>
-    <span id="mode-info" style="color:#64748b;font-size:0.7rem;"></span>
-    <button class="refresh-btn" onclick="loadStats()">Refresh Now</button>
-  </div>
-
   <div class="alarm-bar" id="alarm-bar">
     <span class="alarm-text" id="alarm-text">SLOTS AVAILABLE!</span>
     <button class="alarm-dismiss" onclick="dismissAlarm()">Dismiss</button>
+  </div>
+
+  <div class="live-bar" id="live-bar">
+    <span class="live-dot disconnected" id="live-dot"></span>
+    <span class="live-state" id="live-state">Connecting...</span>
+    <span class="live-detail" id="live-detail"></span>
+    <span class="live-progress" id="live-progress"></span>
+    <span class="live-countdown" id="live-countdown"></span>
+    <span class="conn-status" id="conn-status"></span>
+    <span id="mode-info" style="color:#64748b;font-size:0.7rem;"></span>
+    <button class="force-btn" id="force-btn" onclick="forceCheck()">FORCE CHECK NOW</button>
   </div>
 
   <div class="grid" id="stat-cards"></div>
@@ -242,77 +263,7 @@ function renderFoundLog(log) {
 }
 
 function loadStats() {
-  fetch('/api/stats')
-    .then(r => r.json())
-    .then(s => {
-      // Header
-      const siteUp = s.site_status === 'up';
-      const siteColor = siteUp ? 'dot-green' : (s.site_status === 'blocked' ? 'dot-red' : 'dot-red');
-      const siteLabel = s.site_status ? s.site_status.toUpperCase() : 'UNKNOWN';
-      document.getElementById('site-health').innerHTML = '<span class="dot ' + siteColor + '"></span> HCI Site: ' + siteLabel;
-      const pip = s.proxy_ip && s.proxy_ip !== 'unknown';
-      document.getElementById('proxy-info').innerHTML = '<span class="dot ' + (pip ? 'dot-green' : 'dot-red') + '"></span> Proxy: ' + (s.proxy_ip || 'none');
-      document.getElementById('started-info').textContent = 'Started: ' + fmt(s.started_at);
-      document.getElementById('last-check-info').textContent = 'Last: ' + fmtTime(s.last_check_at);
-
-      // Check for new slots and trigger alarm
-      checkAlarm(s.total_slots_found);
-
-      // Mode indicator
-      var now = new Date();
-      var utcHour = now.getUTCHours();
-      var isPeak = utcHour >= 4 && utcHour < 13;
-      document.getElementById('mode-info').textContent = isPeak ? 'PEAK MODE (every 2 min)' : 'OFF-PEAK (every 5 min)';
-
-      // Cards
-      document.getElementById('stat-cards').innerHTML =
-        '<div class="card"><div class="card-label">Checks</div><div class="card-value blue">' + s.total_checks + '</div></div>' +
-        '<div class="card"><div class="card-label">Slots Found</div><div class="card-value green">' + s.total_slots_found + '</div></div>' +
-        '<div class="card"><div class="card-label">Notifications</div><div class="card-value amber">' + s.total_notifications_sent + '</div></div>' +
-        '<div class="card"><div class="card-label">Errors</div><div class="card-value red">' + s.total_errors + '</div></div>';
-
-      // Location cards
-      document.getElementById('location-cards').innerHTML = renderLocations(s.locations);
-
-      // Found log
-      document.getElementById('found-log').innerHTML = renderFoundLog(s.found_log || []);
-
-      // Check history
-      const checks = (s.check_history || []).slice().reverse().slice(0, 40);
-      _lastChecks = checks;
-      document.getElementById('check-history').innerHTML = checks.map((c, i) => {
-        const via = c.fetched_via || '-';
-        const ip = c.fetched_ip ? ' ' + c.fetched_ip : '';
-        return '<tr class="clickable" onclick="showCheckDetail(' + i + ')"><td>' + fmt(c.timestamp) + '</td><td>' + (c.location_name||c.location_id||'-') +
-        '</td><td>' + c.month + '/' + c.year + '</td><td>' + c.slots_found +
-        '</td><td>' + ((c.available_dates||[]).join(', ')||'-') +
-        '</td><td style="font-size:0.65rem">' + via + '<br><span style="color:#64748b">' + ip + '</span></td>' +
-        '<td class="' + (c.error ? 'err' : 'ok') + '">' + (c.error ? c.error.substring(0,60)+'...' : 'OK') + '</td></tr>';
-      }).join('');
-
-      // Notifications
-      const notifs = (s.notification_log || []).slice().reverse().slice(0, 20);
-      document.getElementById('notification-log').innerHTML = notifs.map(n =>
-        '<tr><td>' + fmt(n.timestamp) + '</td><td>' + n.channel + '</td><td>' + n.slots_count +
-        '</td><td class="' + (n.success ? 'ok' : 'err') + '">' + (n.success ? 'Sent' : 'Failed') + '</td></tr>'
-      ).join('');
-
-      // Health history
-      const health = (s.health_history || []).slice().reverse().slice(0, 20);
-      document.getElementById('health-history').innerHTML = health.map(h => {
-        const statusClass = h.status === 'up' ? 'ok' : 'err';
-        const detail = h.error || h.blocked || '-';
-        return '<tr><td>' + fmt(h.timestamp) + '</td>' +
-          '<td class="' + statusClass + '" style="font-weight:600">' + (h.status || '?').toUpperCase() + '</td>' +
-          '<td>' + (h.http_code || '-') + '</td>' +
-          '<td>' + (h.response_time ? h.response_time + 's' : '-') + '</td>' +
-          '<td style="font-size:0.65rem">' + (h.proxy_ip || '-') + '</td>' +
-          '<td style="font-size:0.65rem;max-width:200px;overflow:hidden;text-overflow:ellipsis">' + detail + '</td></tr>';
-      }).join('');
-    })
-    .catch(() => {
-      document.getElementById('stat-cards').innerHTML = '<div class="card"><div class="card-value red">Error loading stats</div></div>';
-    });
+  // Placeholder — overridden below with live-state-aware version
 }
 
 var _lastChecks = [];
@@ -409,8 +360,199 @@ function showFoundDetail(idx) {
   document.getElementById('detail-modal').classList.add('show');
 }
 
+// --- Live status & connection tracking ---
+var _connected = false;
+var _failCount = 0;
+var _pollInterval = null;
+var _countdownInterval = null;
+var _nextCheckAt = null;
+var _forceTriggered = false;
+
+var STATE_LABELS = {
+  starting: 'STARTING',
+  health_check: 'HEALTH CHECK',
+  checking: 'CHECKING',
+  sleeping: 'SLEEPING',
+  idle: 'IDLE'
+};
+var STATE_COLORS = {
+  starting: '#60a5fa',
+  health_check: '#fbbf24',
+  checking: '#4ade80',
+  sleeping: '#94a3b8',
+  idle: '#64748b'
+};
+
+function updateLiveBar(s) {
+  var dot = document.getElementById('live-dot');
+  var stateEl = document.getElementById('live-state');
+  var detailEl = document.getElementById('live-detail');
+  var progressEl = document.getElementById('live-progress');
+  var connEl = document.getElementById('conn-status');
+  var forceBtn = document.getElementById('force-btn');
+
+  var state = s.monitor_state || 'idle';
+  var label = STATE_LABELS[state] || state.toUpperCase();
+  var color = STATE_COLORS[state] || '#64748b';
+
+  stateEl.textContent = label;
+  stateEl.style.color = color;
+  detailEl.textContent = s.monitor_detail || '';
+  progressEl.textContent = s.monitor_progress ? '[' + s.monitor_progress + ']' : '';
+
+  // Dot animation
+  dot.className = 'live-dot';
+  if (state === 'checking' || state === 'health_check') {
+    dot.classList.add('checking');
+  } else if (_connected) {
+    dot.classList.add('connected');
+  } else {
+    dot.classList.add('disconnected');
+  }
+
+  connEl.textContent = _connected ? 'LIVE' : 'RECONNECTING...';
+  connEl.style.color = _connected ? '#4ade80' : '#f87171';
+
+  // Countdown
+  _nextCheckAt = s.next_check_at ? new Date(s.next_check_at) : null;
+  updateCountdown();
+
+  // Force check button state
+  if (state === 'checking' || state === 'health_check') {
+    forceBtn.disabled = true;
+    forceBtn.textContent = 'CHECKING...';
+    _forceTriggered = false;
+  } else if (_forceTriggered) {
+    forceBtn.disabled = true;
+    forceBtn.textContent = 'TRIGGERED';
+    forceBtn.className = 'force-btn triggered';
+  } else {
+    forceBtn.disabled = false;
+    forceBtn.textContent = 'FORCE CHECK NOW';
+    forceBtn.className = 'force-btn';
+  }
+
+  // Adjust poll speed: fast when checking, normal when sleeping
+  var targetInterval = (state === 'checking' || state === 'health_check') ? 2000 : 5000;
+  if (_pollInterval && _pollInterval._ms !== targetInterval) {
+    clearInterval(_pollInterval);
+    _pollInterval = setInterval(loadStats, targetInterval);
+    _pollInterval._ms = targetInterval;
+  }
+}
+
+function updateCountdown() {
+  var el = document.getElementById('live-countdown');
+  if (!_nextCheckAt) { el.textContent = ''; return; }
+  var diff = Math.max(0, Math.floor((_nextCheckAt - new Date()) / 1000));
+  if (diff <= 0) { el.textContent = ''; return; }
+  var m = Math.floor(diff / 60), sec = diff % 60;
+  el.textContent = m + ':' + (sec < 10 ? '0' : '') + sec;
+}
+
+function forceCheck() {
+  var btn = document.getElementById('force-btn');
+  btn.disabled = true;
+  btn.textContent = 'TRIGGERING...';
+  _forceTriggered = true;
+  fetch('/api/force-check', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function() {
+      btn.textContent = 'TRIGGERED';
+      btn.className = 'force-btn triggered';
+      setTimeout(loadStats, 500);
+    })
+    .catch(function() {
+      btn.textContent = 'FAILED';
+      btn.disabled = false;
+      _forceTriggered = false;
+    });
+}
+
+// Override loadStats to track connection
+var _origLoadStats = loadStats;
+loadStats = function() {
+  fetch('/api/stats')
+    .then(function(r) { return r.json(); })
+    .then(function(s) {
+      _connected = true;
+      _failCount = 0;
+      updateLiveBar(s);
+
+      // Header
+      var siteUp = s.site_status === 'up';
+      var siteColor = siteUp ? 'dot-green' : 'dot-red';
+      var siteLabel = s.site_status ? s.site_status.toUpperCase() : 'UNKNOWN';
+      document.getElementById('site-health').innerHTML = '<span class="dot ' + siteColor + '"></span> HCI Site: ' + siteLabel;
+      var pip = s.proxy_ip && s.proxy_ip !== 'unknown';
+      document.getElementById('proxy-info').innerHTML = '<span class="dot ' + (pip ? 'dot-green' : 'dot-red') + '"></span> Proxy: ' + (s.proxy_ip || 'none');
+      document.getElementById('started-info').textContent = 'Started: ' + fmt(s.started_at);
+      document.getElementById('last-check-info').textContent = 'Last: ' + fmtTime(s.last_check_at);
+      checkAlarm(s.total_slots_found);
+      var now = new Date();
+      var utcHour = now.getUTCHours();
+      var isPeak = utcHour >= 4 && utcHour < 13;
+      document.getElementById('mode-info').textContent = isPeak ? 'PEAK (2m)' : 'OFF-PEAK (5m)';
+
+      // Cards
+      document.getElementById('stat-cards').innerHTML =
+        '<div class="card"><div class="card-label">Checks</div><div class="card-value blue">' + s.total_checks + '</div></div>' +
+        '<div class="card"><div class="card-label">Slots Found</div><div class="card-value green">' + s.total_slots_found + '</div></div>' +
+        '<div class="card"><div class="card-label">Notifications</div><div class="card-value amber">' + s.total_notifications_sent + '</div></div>' +
+        '<div class="card"><div class="card-label">Errors</div><div class="card-value red">' + s.total_errors + '</div></div>';
+
+      document.getElementById('location-cards').innerHTML = renderLocations(s.locations);
+      document.getElementById('found-log').innerHTML = renderFoundLog(s.found_log || []);
+
+      var checks = (s.check_history || []).slice().reverse().slice(0, 40);
+      _lastChecks = checks;
+      document.getElementById('check-history').innerHTML = checks.map(function(c, i) {
+        var via = c.fetched_via || '-';
+        var ip = c.fetched_ip ? ' ' + c.fetched_ip : '';
+        return '<tr class="clickable" onclick="showCheckDetail(' + i + ')"><td>' + fmt(c.timestamp) + '</td><td>' + (c.location_name||c.location_id||'-') +
+        '</td><td>' + c.month + '/' + c.year + '</td><td>' + c.slots_found +
+        '</td><td>' + ((c.available_dates||[]).join(', ')||'-') +
+        '</td><td style="font-size:0.65rem">' + via + '<br><span style="color:#64748b">' + ip + '</span></td>' +
+        '<td class="' + (c.error ? 'err' : 'ok') + '">' + (c.error ? c.error.substring(0,60)+'...' : 'OK') + '</td></tr>';
+      }).join('');
+
+      var notifs = (s.notification_log || []).slice().reverse().slice(0, 20);
+      document.getElementById('notification-log').innerHTML = notifs.map(function(n) {
+        return '<tr><td>' + fmt(n.timestamp) + '</td><td>' + n.channel + '</td><td>' + n.slots_count +
+        '</td><td class="' + (n.success ? 'ok' : 'err') + '">' + (n.success ? 'Sent' : 'Failed') + '</td></tr>';
+      }).join('');
+
+      var health = (s.health_history || []).slice().reverse().slice(0, 20);
+      document.getElementById('health-history').innerHTML = health.map(function(h) {
+        var statusClass = h.status === 'up' ? 'ok' : 'err';
+        var detail = h.error || h.blocked || '-';
+        return '<tr><td>' + fmt(h.timestamp) + '</td>' +
+          '<td class="' + statusClass + '" style="font-weight:600">' + (h.status || '?').toUpperCase() + '</td>' +
+          '<td>' + (h.http_code || '-') + '</td>' +
+          '<td>' + (h.response_time ? h.response_time + 's' : '-') + '</td>' +
+          '<td style="font-size:0.65rem">' + (h.proxy_ip || '-') + '</td>' +
+          '<td style="font-size:0.65rem;max-width:200px;overflow:hidden;text-overflow:ellipsis">' + detail + '</td></tr>';
+      }).join('');
+    })
+    .catch(function() {
+      _connected = false;
+      _failCount++;
+      var dot = document.getElementById('live-dot');
+      dot.className = 'live-dot disconnected';
+      document.getElementById('live-state').textContent = 'DISCONNECTED';
+      document.getElementById('live-state').style.color = '#f87171';
+      document.getElementById('conn-status').textContent = 'Retry #' + _failCount;
+      document.getElementById('conn-status').style.color = '#f87171';
+    });
+};
+
+// Start polling
 loadStats();
-setInterval(loadStats, 10000);
+_pollInterval = setInterval(loadStats, 5000);
+_pollInterval._ms = 5000;
+
+// Countdown timer (updates every second)
+_countdownInterval = setInterval(updateCountdown, 1000);
 </script>
 </body>
 </html>"""
@@ -506,6 +648,31 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "text/plain")
                 self.end_headers()
                 self.wfile.write(b"Snapshot not found")
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self):
+        if not _check_ip(self):
+            self.send_response(403)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"403 Forbidden")
+            return
+        if not _check_auth(self):
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="Stats Tracker"')
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"401 Unauthorized")
+            return
+
+        if self.path == "/api/force-check":
+            tracker.request_force_check()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status":"triggered"}')
         else:
             self.send_response(404)
             self.end_headers()

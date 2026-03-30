@@ -75,6 +75,12 @@ class Stats:
     site_status: str = ""          # "up", "down", "blocked", "timeout"
     last_health_check: str = ""
     health_history: list[dict] = field(default_factory=list)
+    # Live monitor state (not persisted to disk)
+    monitor_state: str = "starting"   # starting/health_check/checking/sleeping/idle
+    monitor_detail: str = ""          # e.g. "Checking Birmingham 04/2026"
+    monitor_progress: str = ""        # e.g. "3/18"
+    next_check_at: str = ""           # ISO timestamp of next check
+    force_check_requested: bool = False
     # Per-location state (latest check only)
     locations: dict[str, dict] = field(default_factory=dict)
     # Found log — every time slots were found (persistent history)
@@ -99,9 +105,15 @@ class StatsTracker:
             except Exception:
                 logger.warning("Could not load stats file, starting fresh")
 
+    # Fields that are transient (not saved to disk)
+    _TRANSIENT_FIELDS = {"monitor_state", "monitor_detail", "monitor_progress",
+                         "next_check_at", "force_check_requested"}
+
     def _save(self):
         STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        STATS_FILE.write_text(json.dumps(asdict(self._stats), indent=2))
+        data = {k: v for k, v in asdict(self._stats).items()
+                if k not in self._TRANSIENT_FIELDS}
+        STATS_FILE.write_text(json.dumps(data, indent=2))
 
     def _get_location(self, location_id: str, location_name: str) -> dict:
         """Get or create location state."""
@@ -228,6 +240,28 @@ class StatsTracker:
         with self._lock:
             self._stats.proxy_ip = ip
             self._save()
+
+    def set_monitor_state(self, state: str, detail: str = "", progress: str = ""):
+        """Update the live monitor state (not persisted to disk)."""
+        with self._lock:
+            self._stats.monitor_state = state
+            self._stats.monitor_detail = detail
+            self._stats.monitor_progress = progress
+
+    def set_next_check_at(self, iso_time: str):
+        with self._lock:
+            self._stats.next_check_at = iso_time
+
+    def request_force_check(self):
+        with self._lock:
+            self._stats.force_check_requested = True
+
+    def consume_force_check(self) -> bool:
+        with self._lock:
+            if self._stats.force_check_requested:
+                self._stats.force_check_requested = False
+                return True
+            return False
 
     def get_stats(self) -> dict:
         with self._lock:

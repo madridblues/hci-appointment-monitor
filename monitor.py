@@ -9,7 +9,9 @@ All requests routed through Crawlbase rotating proxy.
 
 import argparse
 import logging
+import os
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -75,13 +77,16 @@ def notify(slots: list[AvailableSlot]) -> None:
 
 
 def check_location(location_id: str, months: list[str], year: str,
-                   apt_type: str, service_id: str, proxy_url: str) -> list[AvailableSlot]:
+                   apt_type: str, service_id: str, proxy_url: str,
+                   progress_cb=None) -> list[AvailableSlot]:
     """Check all months for a single location. Runs in a thread."""
     location_name = LOCATION_NAMES.get(location_id, f"Location {location_id}")
     location_slots: list[AvailableSlot] = []
 
     for month in months:
         try:
+            if progress_cb:
+                progress_cb(location_name, month)
             logger.info("Checking %s for %s/%s...", location_name, month, year)
             result = check_appointments(
                 month=month,
@@ -146,12 +151,28 @@ def run_check() -> list[AvailableSlot]:
         return []
 
     all_slots: list[AvailableSlot] = []
+    total_tasks = len(config.location_ids) * len(config.monitor_months)
+    completed_count = 0
+    count_lock = threading.Lock()
+
+    def progress_cb(location_name, month):
+        nonlocal completed_count
+        with count_lock:
+            completed_count += 1
+            tracker.set_monitor_state(
+                "checking",
+                detail=f"{location_name} {month}/{config.year}",
+                progress=f"{completed_count}/{total_tasks}",
+            )
+
+    tracker.set_monitor_state("checking", detail="Starting all locations...", progress=f"0/{total_tasks}")
 
     with ThreadPoolExecutor(max_workers=len(config.location_ids)) as executor:
         futures = {
             executor.submit(
                 check_location, loc_id, config.monitor_months, config.year,
                 config.apt_type, config.service_id, config.proxy_url,
+                progress_cb=progress_cb,
             ): loc_id
             for loc_id in config.location_ids
         }
@@ -207,9 +228,9 @@ def main() -> None:
 
     tracker.soft_reset()
     tracker.set_proxy_ip("proxy-rotated")
+    tracker.set_monitor_state("starting", detail="Initializing...")
 
     # Restore found_log from env backup (survives redeploys)
-    import os
     found_backup = os.getenv("FOUND_LOG_BACKUP", "")
     if found_backup:
         tracker.restore_from_env(found_backup)
@@ -232,6 +253,7 @@ def main() -> None:
     while True:
         try:
             # Health check: ping one appointment URL before full cycle
+            tracker.set_monitor_state("health_check", detail="Pinging HCI site...")
             hc = health_check(
                 config.proxy_url,
                 location_id=config.location_ids[0],
@@ -246,7 +268,7 @@ def main() -> None:
             if hc["status"] not in ("up",):
                 logger.warning("=== Site not available: %s (%s) — skipping cycle, next in %ds ===",
                                hc["status"], hc.get("error") or hc.get("blocked") or "", interval)
-                time.sleep(interval)
+                _sleep_with_state(interval, f"Site {hc['status']} — waiting")
                 continue
 
             logger.info("=== Site UP (%s, %ss) — starting check cycle (proxy IP: %s) ===",
@@ -293,10 +315,33 @@ def main() -> None:
 
         try:
             interval = get_check_interval(config)
-            time.sleep(interval)
+            _sleep_with_state(interval, "Waiting for next cycle")
         except KeyboardInterrupt:
             logger.info("Stopped by user.")
             sys.exit(0)
+
+
+def _sleep_with_state(seconds: int, reason: str):
+    """Sleep while updating monitor state with countdown. Wakes early on force check."""
+    next_at = datetime.now(timezone.utc).isoformat()
+    from datetime import timedelta
+    next_at = (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+    tracker.set_next_check_at(next_at)
+
+    remaining = seconds
+    while remaining > 0:
+        mins, secs = divmod(remaining, 60)
+        tracker.set_monitor_state(
+            "sleeping",
+            detail=f"{reason} — next in {mins}m {secs}s",
+        )
+        # Check for force check request every second
+        if tracker.consume_force_check():
+            logger.info("Force check requested — waking up early!")
+            tracker.set_monitor_state("checking", detail="Force check triggered...")
+            return
+        time.sleep(1)
+        remaining -= 1
 
 
 if __name__ == "__main__":
