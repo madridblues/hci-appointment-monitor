@@ -482,6 +482,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(data.encode())
+        elif self.path == "/api/found-log":
+            data = tracker.backup_to_env()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(data.encode())
         elif self.path in ("/", "/dashboard", "/stats"):
             self.send_response(200)
             self.send_header("Content-Type", "text/html")

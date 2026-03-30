@@ -246,6 +246,50 @@ class StatsTracker:
             self._stats.found_log = []
             self._save()
 
+    def soft_reset(self):
+        """Reset current session counters but preserve found_log history."""
+        with self._lock:
+            self._stats.started_at = datetime.now().isoformat()
+            # Clear current location state (will be rebuilt from new checks)
+            self._stats.locations = {}
+            # Reset session counters
+            self._stats.total_checks = 0
+            self._stats.total_slots_found = 0
+            self._stats.total_errors = 0
+            self._stats.total_notifications_sent = 0
+            # Clear current session logs
+            self._stats.check_history = []
+            self._stats.notification_log = []
+            # PRESERVE found_log — this is the persistent history
+            # PRESERVE health_history — useful for debugging
+            self._save()
+
+    def backup_to_env(self) -> str:
+        """Export found_log as JSON string (for env var backup)."""
+        with self._lock:
+            return json.dumps(self._stats.found_log)
+
+    def restore_from_env(self, found_log_json: str):
+        """Import found_log from JSON string (from env var)."""
+        with self._lock:
+            try:
+                imported = json.loads(found_log_json)
+                if isinstance(imported, list):
+                    # Merge: add any entries not already present
+                    existing_keys = {
+                        f"{e.get('location_id')}/{e.get('date')}/{e.get('month')}/{e.get('year')}"
+                        for e in self._stats.found_log
+                    }
+                    for entry in imported:
+                        key = f"{entry.get('location_id')}/{entry.get('date')}/{entry.get('month')}/{entry.get('year')}"
+                        if key not in existing_keys:
+                            self._stats.found_log.append(entry)
+                    self._stats.found_log = self._stats.found_log[-200:]
+                    self._save()
+                    logger.info("Restored %d found_log entries from backup", len(imported))
+            except Exception as e:
+                logger.warning("Failed to restore found_log: %s", e)
+
 
 # Global singleton
 tracker = StatsTracker()

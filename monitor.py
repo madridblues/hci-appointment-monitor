@@ -205,8 +205,15 @@ def main() -> None:
     if not args.no_dashboard and not args.once and config.dashboard_enabled:
         start_dashboard(config.dashboard_host, config.dashboard_port)
 
-    tracker.reset_started()
+    tracker.soft_reset()
     tracker.set_proxy_ip("proxy-rotated")
+
+    # Restore found_log from env backup (survives redeploys)
+    import os
+    found_backup = os.getenv("FOUND_LOG_BACKUP", "")
+    if found_backup:
+        tracker.restore_from_env(found_backup)
+        logger.info("Restored found_log from FOUND_LOG_BACKUP env var")
 
     if args.once:
         slots = run_check()
