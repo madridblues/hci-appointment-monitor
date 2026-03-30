@@ -108,7 +108,7 @@ def _fetch_page(url: str, proxy_url: str) -> FetchResult:
     for attempt in range(3):
         try:
             session = _make_session(proxy_url)
-            response = session.get(url, timeout=180, verify=False)
+            response = session.get(url, timeout=150, verify=False)
             # Retry on 5xx server errors (520, 503, etc.)
             if response.status_code >= 500:
                 session.close()
