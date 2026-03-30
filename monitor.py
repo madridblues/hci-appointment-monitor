@@ -78,7 +78,7 @@ def notify(slots: list[AvailableSlot]) -> None:
 
 def check_location(location_id: str, months: list[str], year: str,
                    apt_type: str, service_id: str, proxy_url: str,
-                   progress_cb=None) -> list[AvailableSlot]:
+                   progress_cb=None, done_cb=None) -> list[AvailableSlot]:
     """Check all months for a single location. Runs in a thread."""
     location_name = LOCATION_NAMES.get(location_id, f"Location {location_id}")
     location_slots: list[AvailableSlot] = []
@@ -122,6 +122,8 @@ def check_location(location_id: str, months: list[str], year: str,
                 green_dates_found=result.green_dates_found,
                 dates_checked=result.dates_checked,
             )
+            if done_cb:
+                done_cb(location_name)
         except Exception as e:
             logger.exception("Error checking %s for %s/%s", location_name, month, year)
             req_url = build_url(month, year, apt_type, location_id, service_id)
@@ -130,6 +132,8 @@ def check_location(location_id: str, months: list[str], year: str,
                 location_id=location_id, location_name=location_name,
                 request_url=req_url,
             )
+            if done_cb:
+                done_cb(location_name)
 
     return location_slots
 
@@ -151,28 +155,49 @@ def run_check() -> list[AvailableSlot]:
         return []
 
     all_slots: list[AvailableSlot] = []
-    total_tasks = len(config.location_ids) * len(config.monitor_months)
-    completed_count = 0
+    n_locs = len(config.location_ids)
+    n_months = len(config.monitor_months)
+    total_tasks = n_locs * n_months
+    done_count = 0
+    active_set: set[str] = set()
     count_lock = threading.Lock()
 
-    def progress_cb(location_name, month):
-        nonlocal completed_count
+    def on_start(location_name, month):
+        """Called when a location+month starts fetching."""
         with count_lock:
-            completed_count += 1
+            active_set.add(location_name)
+            active_names = ", ".join(sorted(active_set))
             tracker.set_monitor_state(
                 "checking",
-                detail=f"{location_name} {month}/{config.year}",
-                progress=f"{completed_count}/{total_tasks}",
+                detail=f"{n_locs} locations concurrent: {active_names}",
+                progress=f"{done_count}/{total_tasks} done",
             )
 
-    tracker.set_monitor_state("checking", detail="Starting all locations...", progress=f"0/{total_tasks}")
+    def on_done(location_name):
+        """Called when a location+month finishes."""
+        nonlocal done_count
+        with count_lock:
+            done_count += 1
+            active_set.discard(location_name)
+            if active_set:
+                active_names = ", ".join(sorted(active_set))
+                detail = f"{len(active_set)} active: {active_names}"
+            else:
+                detail = "Finishing up..."
+            tracker.set_monitor_state(
+                "checking",
+                detail=detail,
+                progress=f"{done_count}/{total_tasks} done",
+            )
 
-    with ThreadPoolExecutor(max_workers=len(config.location_ids)) as executor:
+    tracker.set_monitor_state("checking", detail=f"Starting {n_locs} locations...", progress=f"0/{total_tasks} done")
+
+    with ThreadPoolExecutor(max_workers=n_locs) as executor:
         futures = {
             executor.submit(
                 check_location, loc_id, config.monitor_months, config.year,
                 config.apt_type, config.service_id, config.proxy_url,
-                progress_cb=progress_cb,
+                progress_cb=on_start, done_cb=on_done,
             ): loc_id
             for loc_id in config.location_ids
         }
