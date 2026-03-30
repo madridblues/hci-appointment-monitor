@@ -215,6 +215,8 @@ class CheckResult:
     slots: list['AvailableSlot']
     fetched_via: str
     fetched_ip: str
+    response_snippet: str = ""  # first 500 chars for debugging
+    green_dates_found: int = 0
 
 
 def check_appointments(
@@ -235,12 +237,14 @@ def check_appointments(
     logger.info("Checking appointments at: %s", url)
 
     result = _fetch_page(url, proxy_url, crawlbase_token)
+    snippet = result.html[:500] if result.html else ""
     bookable_dates = _parse_bookable_dates(result.html, month)
 
     if not bookable_dates:
         logger.info("No bookable dates for %s/%s (via %s, IP: %s)",
                      month, year, result.via, result.ip)
-        return CheckResult(slots=[], fetched_via=result.via, fetched_ip=result.ip)
+        return CheckResult(slots=[], fetched_via=result.via, fetched_ip=result.ip,
+                           response_snippet=snippet, green_dates_found=0)
 
     logger.info("Found %d bookable date(s) for %s/%s (via %s, IP: %s), checking time slots...",
                 len(bookable_dates), month, year, result.via, result.ip)
@@ -282,7 +286,8 @@ def check_appointments(
     else:
         logger.info("No available time slots for %s/%s", month, year)
 
-    return CheckResult(slots=available, fetched_via=result.via, fetched_ip=result.ip)
+    return CheckResult(slots=available, fetched_via=result.via, fetched_ip=result.ip,
+                       response_snippet=snippet, green_dates_found=len(bookable_dates))
 
 
 def _parse_bookable_dates(html: str, month: str) -> list[str]:

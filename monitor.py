@@ -102,6 +102,8 @@ def check_location(location_id: str, months: list[str], year: str,
                 slot_details=slot_details,
                 fetched_via=result.fetched_via, fetched_ip=result.fetched_ip,
                 request_url=req_url,
+                response_snippet=result.response_snippet,
+                green_dates_found=result.green_dates_found,
             )
         except Exception as e:
             logger.exception("Error checking %s for %s/%s", location_name, month, year)

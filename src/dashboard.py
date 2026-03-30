@@ -277,14 +277,20 @@ function showCheckDetail(idx) {
   var dates = (c.available_dates || []).join(', ') || 'None';
   var err = c.error || 'None';
   document.getElementById('modal-title').textContent = (c.location_name || c.location_id) + ' — ' + c.month + '/' + c.year;
+  var snippet = c.response_snippet || 'N/A';
+  var greenDates = c.green_dates_found || 0;
   document.getElementById('modal-body').innerHTML =
     '<div class="detail-row"><span class="detail-label">Timestamp</span><span class="detail-value">' + fmt(c.timestamp) + '</span></div>' +
     '<div class="detail-row"><span class="detail-label">Fetched Via</span><span class="detail-value">' + via + '</span></div>' +
     '<div class="detail-row"><span class="detail-label">Proxy IP</span><span class="detail-value">' + ip + '</span></div>' +
+    '<div class="detail-row"><span class="detail-label">Green Dates Found</span><span class="detail-value">' + greenDates + '</span></div>' +
     '<div class="detail-row"><span class="detail-label">Slots Found</span><span class="detail-value">' + c.slots_found + '</span></div>' +
     '<div class="detail-row"><span class="detail-label">Available Dates</span><span class="detail-value">' + dates + '</span></div>' +
     '<div class="detail-row"><span class="detail-label">Error</span><span class="detail-value ' + (c.error ? 'err' : 'ok') + '">' + err + '</span></div>' +
-    '<div class="detail-row"><span class="detail-label">Request URL</span><span class="detail-value"><a class="detail-url" href="' + url + '" target="_blank">' + url + '</a></span></div>';
+    '<div class="detail-row"><span class="detail-label">Request URL</span><span class="detail-value"><a class="detail-url" href="' + url + '" target="_blank">' + url + '</a></span></div>' +
+    '<div style="margin-top:12px"><span class="detail-label">Response (first 500 chars):</span>' +
+    '<pre style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:10px;margin-top:6px;font-size:0.65rem;color:#94a3b8;overflow-x:auto;white-space:pre-wrap;word-break:break-all;max-height:200px;overflow-y:auto">' +
+    snippet.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</pre></div>';
   document.getElementById('detail-modal').classList.add('show');
 }
 
