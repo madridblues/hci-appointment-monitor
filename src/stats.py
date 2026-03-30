@@ -24,6 +24,7 @@ class CheckRecord:
     error: str = ""
     fetched_via: str = ""
     fetched_ip: str = ""
+    request_url: str = ""
 
 
 @dataclass
@@ -107,7 +108,7 @@ class StatsTracker:
     def record_check(self, month: str, year: str, slots_found: int, available_dates: list[str],
                      error: str = "", location_id: str = "", location_name: str = "",
                      slot_details: list[dict] | None = None, proxy_ip: str = "",
-                     fetched_via: str = "", fetched_ip: str = ""):
+                     fetched_via: str = "", fetched_ip: str = "", request_url: str = ""):
         with self._lock:
             now = datetime.now().isoformat()
             self._stats.total_checks += 1
@@ -172,6 +173,7 @@ class StatsTracker:
                 slots_found=slots_found, available_dates=available_dates,
                 location_id=location_id, location_name=location_name,
                 error=error, fetched_via=fetched_via, fetched_ip=fetched_ip,
+                request_url=request_url,
             )
             self._stats.check_history.append(asdict(record))
             self._stats.check_history = self._stats.check_history[-200:]

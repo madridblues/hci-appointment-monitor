@@ -209,6 +209,14 @@ def _parse_time_slots(html: str) -> list[TimeSlot]:
     return slots
 
 
+@dataclass
+class CheckResult:
+    """Result of checking a month for appointments."""
+    slots: list['AvailableSlot']
+    fetched_via: str
+    fetched_ip: str
+
+
 def check_appointments(
     month: str,
     year: str,
@@ -217,11 +225,11 @@ def check_appointments(
     service_id: str = "29",
     proxy_url: str = "",
     crawlbase_token: str = "",
-) -> list[AvailableSlot]:
+) -> CheckResult:
     """
     Fetch the appointment page, find bookable dates, then fetch each date's
-    page to get available time slots. Only returns dates that have at least
-    one bookable time slot. Tries proxy first, falls back to direct.
+    page to get available time slots. Returns CheckResult with slots and
+    fetch metadata (via/ip) even when no slots found.
     """
     url = build_url(month, year, apt_type, location_id, service_id)
     logger.info("Checking appointments at: %s", url)
@@ -232,7 +240,7 @@ def check_appointments(
     if not bookable_dates:
         logger.info("No bookable dates for %s/%s (via %s, IP: %s)",
                      month, year, result.via, result.ip)
-        return []
+        return CheckResult(slots=[], fetched_via=result.via, fetched_ip=result.ip)
 
     logger.info("Found %d bookable date(s) for %s/%s (via %s, IP: %s), checking time slots...",
                 len(bookable_dates), month, year, result.via, result.ip)
@@ -274,7 +282,7 @@ def check_appointments(
     else:
         logger.info("No available time slots for %s/%s", month, year)
 
-    return available
+    return CheckResult(slots=available, fetched_via=result.via, fetched_ip=result.ip)
 
 
 def _parse_bookable_dates(html: str, month: str) -> list[str]:

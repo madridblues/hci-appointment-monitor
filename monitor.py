@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.config import LOCATION_NAMES, load_config
 from src.dashboard import start_dashboard
 from src.notifier import send_email, send_webhook
-from src.scraper import AvailableSlot, check_appointments, get_direct_ip, save_snapshot
+from src.scraper import AvailableSlot, CheckResult, check_appointments, get_direct_ip, save_snapshot, build_url
 from src.stats import tracker
 
 logging.basicConfig(
@@ -70,7 +70,7 @@ def check_location(location_id: str, months: list[str], year: str,
     for month in months:
         try:
             logger.info("Checking %s for %s/%s...", location_name, month, year)
-            slots = check_appointments(
+            result = check_appointments(
                 month=month,
                 year=year,
                 apt_type=apt_type,
@@ -80,13 +80,10 @@ def check_location(location_id: str, months: list[str], year: str,
                 crawlbase_token=crawlbase_token,
             )
             # Only keep slots with actual time slots
-            slots_with_times = [s for s in slots if s.time_slots]
+            slots_with_times = [s for s in result.slots if s.time_slots]
             location_slots.extend(slots_with_times)
 
             dates = [s.date for s in slots_with_times]
-            # Determine fetch info from first slot (same for all in this check)
-            fetched_via = slots_with_times[0].fetched_via if slots_with_times else ""
-            fetched_ip = slots_with_times[0].fetched_ip if slots_with_times else ""
             slot_details = [
                 {
                     "date": s.date,
@@ -98,17 +95,21 @@ def check_location(location_id: str, months: list[str], year: str,
                 }
                 for s in slots_with_times
             ]
+            req_url = build_url(month, year, apt_type, location_id, service_id)
             tracker.record_check(
                 month, year, len(slots_with_times), dates,
                 location_id=location_id, location_name=location_name,
                 slot_details=slot_details,
-                fetched_via=fetched_via, fetched_ip=fetched_ip,
+                fetched_via=result.fetched_via, fetched_ip=result.fetched_ip,
+                request_url=req_url,
             )
         except Exception as e:
             logger.exception("Error checking %s for %s/%s", location_name, month, year)
+            req_url = build_url(month, year, apt_type, location_id, service_id)
             tracker.record_check(
                 month, year, 0, [], error=str(e),
                 location_id=location_id, location_name=location_name,
+                request_url=req_url,
             )
 
     return location_slots

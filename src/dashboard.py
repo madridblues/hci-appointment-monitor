@@ -67,6 +67,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .refresh-btn:hover { background: #475569; }
   .found-row { background: #0d2818; }
   .found-times { color: #94a3b8; font-size: 0.7rem; }
+  .clickable { cursor: pointer; }
+  .clickable:hover td { background: #334155; }
+  .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 100; justify-content: center; align-items: center; }
+  .modal-overlay.show { display: flex; }
+  .modal { background: #1e293b; border: 1px solid #475569; border-radius: 12px; padding: 24px; max-width: 700px; width: 90%; max-height: 80vh; overflow-y: auto; }
+  .modal h3 { margin-bottom: 12px; font-size: 1.1rem; }
+  .modal-close { float: right; background: #475569; border: none; color: #e2e8f0; padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 0.8rem; }
+  .modal-close:hover { background: #64748b; }
+  .detail-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #334155; font-size: 0.8rem; }
+  .detail-label { color: #94a3b8; }
+  .detail-value { color: #e2e8f0; text-align: right; word-break: break-all; max-width: 400px; }
+  .detail-url { color: #60a5fa; text-decoration: none; font-size: 0.75rem; }
+  .detail-url:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -119,6 +132,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <tbody id="notification-log"></tbody>
       </table>
     </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="detail-modal" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal()">Close</button>
+    <h3 id="modal-title">Request Details</h3>
+    <div id="modal-body"></div>
   </div>
 </div>
 
@@ -179,11 +200,13 @@ function renderLocations(locations) {
 
 function renderFoundLog(log) {
   if (!log || log.length === 0) return '<tr><td colspan="6" class="no-data">No slots found yet</td></tr>';
-  return log.slice().reverse().slice(0, 50).map(f => {
+  var items = log.slice().reverse().slice(0, 50);
+  _lastFound = items;
+  return items.map((f, i) => {
     const times = (f.time_slots || []).map(t => t.time + ' (' + t.available + ')').join(', ');
     const via = f.fetched_via || '-';
     const ip = f.fetched_ip || '-';
-    return '<tr class="found-row"><td>' + fmt(f.timestamp) + '</td><td>' + (f.location_name||f.location_id) +
+    return '<tr class="found-row clickable" onclick="showFoundDetail(' + i + ')"><td>' + fmt(f.timestamp) + '</td><td>' + (f.location_name||f.location_id) +
       '</td><td>' + f.date + '/' + f.month + '/' + f.year +
       '</td><td class="found-times">' + (times || '-') +
       '</td><td>' + via + '</td><td style="font-size:0.65rem;color:#94a3b8">' + ip + '</td></tr>';
@@ -215,10 +238,11 @@ function loadStats() {
 
       // Check history
       const checks = (s.check_history || []).slice().reverse().slice(0, 40);
-      document.getElementById('check-history').innerHTML = checks.map(c => {
+      _lastChecks = checks;
+      document.getElementById('check-history').innerHTML = checks.map((c, i) => {
         const via = c.fetched_via || '-';
         const ip = c.fetched_ip ? ' ' + c.fetched_ip : '';
-        return '<tr><td>' + fmt(c.timestamp) + '</td><td>' + (c.location_name||c.location_id||'-') +
+        return '<tr class="clickable" onclick="showCheckDetail(' + i + ')"><td>' + fmt(c.timestamp) + '</td><td>' + (c.location_name||c.location_id||'-') +
         '</td><td>' + c.month + '/' + c.year + '</td><td>' + c.slots_found +
         '</td><td>' + ((c.available_dates||[]).join(', ')||'-') +
         '</td><td style="font-size:0.65rem">' + via + '<br><span style="color:#64748b">' + ip + '</span></td>' +
@@ -235,6 +259,46 @@ function loadStats() {
     .catch(() => {
       document.getElementById('stat-cards').innerHTML = '<div class="card"><div class="card-value red">Error loading stats</div></div>';
     });
+}
+
+var _lastChecks = [];
+var _lastFound = [];
+
+function closeModal() {
+  document.getElementById('detail-modal').classList.remove('show');
+}
+
+function showCheckDetail(idx) {
+  var c = _lastChecks[idx];
+  if (!c) return;
+  var via = c.fetched_via || 'N/A';
+  var ip = c.fetched_ip || 'N/A';
+  var url = c.request_url || 'N/A';
+  var dates = (c.available_dates || []).join(', ') || 'None';
+  var err = c.error || 'None';
+  document.getElementById('modal-title').textContent = (c.location_name || c.location_id) + ' — ' + c.month + '/' + c.year;
+  document.getElementById('modal-body').innerHTML =
+    '<div class="detail-row"><span class="detail-label">Timestamp</span><span class="detail-value">' + fmt(c.timestamp) + '</span></div>' +
+    '<div class="detail-row"><span class="detail-label">Fetched Via</span><span class="detail-value">' + via + '</span></div>' +
+    '<div class="detail-row"><span class="detail-label">Proxy IP</span><span class="detail-value">' + ip + '</span></div>' +
+    '<div class="detail-row"><span class="detail-label">Slots Found</span><span class="detail-value">' + c.slots_found + '</span></div>' +
+    '<div class="detail-row"><span class="detail-label">Available Dates</span><span class="detail-value">' + dates + '</span></div>' +
+    '<div class="detail-row"><span class="detail-label">Error</span><span class="detail-value ' + (c.error ? 'err' : 'ok') + '">' + err + '</span></div>' +
+    '<div class="detail-row"><span class="detail-label">Request URL</span><span class="detail-value"><a class="detail-url" href="' + url + '" target="_blank">' + url + '</a></span></div>';
+  document.getElementById('detail-modal').classList.add('show');
+}
+
+function showFoundDetail(idx) {
+  var f = _lastFound[idx];
+  if (!f) return;
+  var times = (f.time_slots || []).map(function(t) { return t.time + ' (' + t.available + ' slot(s))'; }).join('<br>');
+  document.getElementById('modal-title').textContent = (f.location_name || f.location_id) + ' — ' + f.date + '/' + f.month + '/' + f.year;
+  document.getElementById('modal-body').innerHTML =
+    '<div class="detail-row"><span class="detail-label">Found At</span><span class="detail-value">' + fmt(f.timestamp) + '</span></div>' +
+    '<div class="detail-row"><span class="detail-label">Fetched Via</span><span class="detail-value">' + (f.fetched_via || 'N/A') + '</span></div>' +
+    '<div class="detail-row"><span class="detail-label">Proxy IP</span><span class="detail-value">' + (f.fetched_ip || 'N/A') + '</span></div>' +
+    '<div class="detail-row"><span class="detail-label">Time Slots</span><span class="detail-value">' + (times || '-') + '</span></div>';
+  document.getElementById('detail-modal').classList.add('show');
 }
 
 loadStats();
