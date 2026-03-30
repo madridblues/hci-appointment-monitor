@@ -2,33 +2,20 @@
 """
 HCI London Appointment Monitor
 
-Continuously monitors the HCI London appointment booking page across multiple
-locations and months for available slots with time information, and sends
-notifications via email and/or webhook.
-
-Usage:
-    # Copy .env.example to .env and configure
-    cp .env.example .env
-
-    # Run the monitor
-    python monitor.py
-
-    # Single check (no loop)
-    python monitor.py --once
-
-    # Disable dashboard
-    python monitor.py --no-dashboard
+Monitors multiple locations concurrently for available appointment slots
+with time information, and sends notifications via email and/or webhook.
 """
 
 import argparse
 import logging
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from src.config import LOCATION_NAMES, load_config
 from src.dashboard import start_dashboard
 from src.notifier import send_email, send_webhook
-from src.scraper import AvailableSlot, check_appointments, get_proxy_ip, get_proxy_ip_for_location
+from src.scraper import AvailableSlot, check_appointments, get_proxy_ip
 from src.stats import tracker
 
 logging.basicConfig(
@@ -73,53 +60,74 @@ def notify(slots: list[AvailableSlot]) -> None:
             logger.error("Webhook notification failed, continuing...")
 
 
+def check_location(location_id: str, months: list[str], year: str,
+                   apt_type: str, service_id: str, proxy_url: str) -> list[AvailableSlot]:
+    """Check all months for a single location. Runs in a thread."""
+    location_name = LOCATION_NAMES.get(location_id, f"Location {location_id}")
+    location_slots: list[AvailableSlot] = []
+
+    for month in months:
+        try:
+            logger.info("Checking %s for %s/%s...", location_name, month, year)
+            slots = check_appointments(
+                month=month,
+                year=year,
+                apt_type=apt_type,
+                location_id=location_id,
+                service_id=service_id,
+                proxy_url=proxy_url,
+            )
+            # Only keep slots with actual time slots
+            slots_with_times = [s for s in slots if s.time_slots]
+            location_slots.extend(slots_with_times)
+
+            dates = [s.date for s in slots_with_times]
+            slot_details = [
+                {
+                    "date": s.date,
+                    "month": s.month,
+                    "year": s.year,
+                    "time_slots": [{"time": ts.time, "available": ts.available} for ts in s.time_slots],
+                }
+                for s in slots_with_times
+            ]
+            tracker.record_check(
+                month, year, len(slots_with_times), dates,
+                location_id=location_id, location_name=location_name,
+                slot_details=slot_details,
+            )
+        except Exception as e:
+            logger.exception("Error checking %s for %s/%s", location_name, month, year)
+            tracker.record_check(
+                month, year, 0, [], error=str(e),
+                location_id=location_id, location_name=location_name,
+            )
+
+    return location_slots
+
+
 def run_check() -> list[AvailableSlot]:
-    """Run a single check across all configured locations and months."""
+    """Run checks across all locations concurrently."""
     config = load_config()
 
     all_slots: list[AvailableSlot] = []
-    for location_id in config.location_ids:
-        location_name = LOCATION_NAMES.get(location_id, f"Location {location_id}")
-        # Get proxy IP for this location's session
-        loc_proxy_ip = ""
-        if config.proxy_url:
-            loc_proxy_ip = get_proxy_ip_for_location(config.proxy_url, location_id)
-        for month in config.monitor_months:
+
+    with ThreadPoolExecutor(max_workers=len(config.location_ids)) as executor:
+        futures = {
+            executor.submit(
+                check_location, loc_id, config.monitor_months, config.year,
+                config.apt_type, config.service_id, config.proxy_url,
+            ): loc_id
+            for loc_id in config.location_ids
+        }
+
+        for future in as_completed(futures):
+            loc_id = futures[future]
             try:
-                logger.info("Checking %s for %s/%s...", location_name, month, config.year)
-                slots = check_appointments(
-                    month=month,
-                    year=config.year,
-                    apt_type=config.apt_type,
-                    location_id=location_id,
-                    service_id=config.service_id,
-                    proxy_url=config.proxy_url,
-                )
+                slots = future.result()
                 all_slots.extend(slots)
-                # Only include slots that actually have time slots available
-                slots_with_times = [s for s in slots if s.time_slots]
-                dates = [s.date for s in slots_with_times]
-                slot_details = [
-                    {
-                        "date": s.date,
-                        "month": s.month,
-                        "year": s.year,
-                        "time_slots": [{"time": ts.time, "available": ts.available} for ts in s.time_slots],
-                    }
-                    for s in slots_with_times
-                ]
-                tracker.record_check(
-                    month, config.year, len(slots_with_times), dates,
-                    location_id=location_id, location_name=location_name,
-                    slot_details=slot_details, proxy_ip=loc_proxy_ip,
-                )
-            except Exception as e:
-                logger.exception("Error checking %s for %s/%s", location_name, month, config.year)
-                tracker.record_check(
-                    month, config.year, 0, [], error=str(e),
-                    location_id=location_id, location_name=location_name,
-                    proxy_ip=loc_proxy_ip,
-                )
+            except Exception:
+                logger.exception("Thread failed for location %s", loc_id)
 
     return all_slots
 
@@ -143,15 +151,11 @@ def main() -> None:
         "Monitoring %d locations: %s",
         len(config.location_ids), ", ".join(location_names),
     )
-    # Detect and log proxy IP
-    proxy_ip = get_proxy_ip(config.proxy_url)
-    tracker.set_proxy_ip(proxy_ip)
-    logger.info("Outgoing IP: %s (proxy: %s)", proxy_ip, bool(config.proxy_url))
-
     logger.info(
-        "Months: %s/%s | Type: %s | Interval: %ds | Email: %s | Webhook: %s",
+        "Months: %s/%s | Type: %s | Interval: %ds | Email: %s | Webhook: %s | Proxy: %s",
         ",".join(config.monitor_months), config.year, config.apt_type,
         config.check_interval, config.email_enabled, config.webhook_enabled,
+        bool(config.proxy_url),
     )
 
     # Start dashboard
@@ -159,6 +163,15 @@ def main() -> None:
         start_dashboard(config.dashboard_host, config.dashboard_port)
 
     tracker.reset_started()
+
+    # Detect proxy IP in background (non-blocking)
+    if config.proxy_url:
+        try:
+            ip = get_proxy_ip(config.proxy_url)
+            tracker.set_proxy_ip(ip)
+            logger.info("Proxy IP: %s", ip)
+        except Exception:
+            logger.warning("Could not detect proxy IP")
 
     if args.once:
         slots = run_check()
@@ -176,7 +189,9 @@ def main() -> None:
     previously_found: set[str] = set()
     while True:
         try:
+            logger.info("=== Starting check cycle ===")
             slots = run_check()
+
             # Only notify on newly discovered slots (keyed by location+date)
             new_slots = [
                 s for s in slots
@@ -190,8 +205,16 @@ def main() -> None:
                     logger.info("NEW: %s - %s/%s/%s: %s", loc, s.date, s.month, s.year, times)
                     previously_found.add(f"{s.location_id}/{s.month}/{s.date}/{s.year}")
                 notify(new_slots)
-            else:
-                logger.info("No new slots. Next check in %ds...", config.check_interval)
+
+            # Remove from previously_found if no longer available
+            current_keys = {f"{s.location_id}/{s.month}/{s.date}/{s.year}" for s in slots}
+            stale = previously_found - current_keys
+            if stale:
+                previously_found -= stale
+                logger.info("Removed %d stale slot(s) from tracking", len(stale))
+
+            logger.info("=== Check cycle complete. %d available, next in %ds ===",
+                        len(slots), config.check_interval)
 
         except KeyboardInterrupt:
             logger.info("Stopped by user.")

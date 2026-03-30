@@ -36,7 +36,7 @@ class Config:
     year: str = "2026"
 
     # Monitoring
-    check_interval: int = 300  # seconds
+    check_interval: int = 300  # seconds (5 minutes)
 
     # Email
     email_enabled: bool = False

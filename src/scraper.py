@@ -182,7 +182,9 @@ def check_appointments(
 
     session_id = f"loc{location_id}"
     if proxy_url:
-        logger.info("Using proxy session: %s", session_id)
+        # Log the proxy IP being used for this session
+        ip = get_proxy_ip_for_location(proxy_url, location_id)
+        logger.info("Using proxy session %s (IP: %s)", session_id, ip)
 
     html = _fetch_page(url, proxy_url, session_id=session_id)
     bookable_dates = _parse_bookable_dates(html, month)
